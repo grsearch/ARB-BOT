@@ -4,536 +4,745 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Arb Bot Dashboard</title>
-<script src="https://cdn.tailwindcss.com"></script>
-<script defer src="https://unpkg.com/alpinejs@3.14.1/dist/cdn.min.js"></script>
 <style>
-  :root { color-scheme: dark; }
-  body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
-  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-  .pulse-dot { width:8px; height:8px; border-radius:99px; display:inline-block; }
-  .blink { animation: blink 1.2s infinite; }
-  @keyframes blink { 0%,100%{opacity:.4} 50%{opacity:1} }
-  .row-up   { background: rgba(34,197,94,.08); }
-  .row-down { background: rgba(239,68,68,.08); }
-  .tab-active { border-color:#22d3ee; color:#22d3ee; }
-  .latency-bar-wrap {
-    display:flex; gap:1px; width:100%; max-width:200px;
-    border-radius:2px; overflow:hidden; background:#1e293b;
-  }
-  .latency-bar-seg { height:8px; min-width:1px; }
+:root {
+  color-scheme: dark;
+  --bg: #020617;
+  --bg-card: #0f172a;
+  --border: #1e293b;
+  --text: #f1f5f9;
+  --text-dim: #94a3b8;
+  --text-muted: #64748b;
+  --green: #22c55e;
+  --green-light: #4ade80;
+  --red: #ef4444;
+  --red-light: #f87171;
+  --amber: #f59e0b;
+  --amber-light: #fbbf24;
+  --cyan: #22d3ee;
+  --cyan-light: #67e8f9;
+  --purple: #a855f7;
+}
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; padding: 0;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: var(--bg); color: var(--text);
+  font-size: 14px; line-height: 1.5;
+}
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.container { max-width: 1280px; margin: 0 auto; padding: 16px; }
+
+/* header */
+.header {
+  display: flex; justify-content: space-between; align-items: center;
+  flex-wrap: wrap; gap: 12px; margin-bottom: 20px;
+}
+.title-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.title { font-size: 24px; font-weight: 700; }
+.dot { width: 8px; height: 8px; border-radius: 99px; display: inline-block; }
+.dot-green { background: var(--green-light); animation: blink 1.2s infinite; }
+.dot-amber { background: var(--amber-light); }
+.dot-red   { background: var(--red-light); }
+@keyframes blink { 0%,100%{opacity:.4} 50%{opacity:1} }
+.badge {
+  font-size: 11px; padding: 2px 8px; border-radius: 4px; font-weight: 500;
+}
+.badge-amber  { background: rgba(245,158,11,.2); color: var(--amber-light); }
+.badge-green  { background: rgba(34,197,94,.2); color: var(--green-light); }
+.badge-slate  { background: rgba(71,85,105,.3); color: var(--text-dim); }
+.badge-cyan   { background: rgba(34,211,238,.2); color: var(--cyan-light); }
+.badge-purple { background: rgba(168,85,247,.2); color: #c4b5fd; }
+.badge-red    { background: rgba(239,68,68,.2); color: var(--red-light); }
+
+/* buttons */
+.btn {
+  padding: 6px 12px; border-radius: 4px; border: none; cursor: pointer;
+  font-size: 13px; color: var(--text); transition: background .15s;
+}
+.btn:hover { opacity: .85; }
+.btn-secondary { background: var(--border); }
+.btn-danger    { background: #991b1b; }
+.btn-danger:hover { background: #b91c1c; }
+
+/* cards */
+.cards-row {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;
+  margin-bottom: 16px;
+}
+@media (max-width: 768px) { .cards-row { grid-template-columns: repeat(2, 1fr); } }
+.card {
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: 8px; padding: 14px;
+}
+.card-label { font-size: 11px; color: var(--text-dim); }
+.card-val { font-size: 22px; font-weight: 700; margin-top: 4px; }
+.card-sub { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+.text-green { color: var(--green-light); }
+.text-red   { color: var(--red-light); }
+.text-amber { color: var(--amber-light); }
+.text-cyan  { color: var(--cyan-light); }
+.text-dim   { color: var(--text-dim); }
+.text-muted { color: var(--text-muted); }
+
+/* breakdown cards */
+.cards-row-2 {
+  display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px;
+  margin-bottom: 20px;
+}
+@media (max-width: 768px) { .cards-row-2 { grid-template-columns: 1fr; } }
+.breakdown { font-size: 13px; }
+.breakdown .row { display: flex; justify-content: space-between; padding: 3px 0; }
+.breakdown .total { border-top: 1px solid var(--border); padding-top: 6px; margin-top: 4px; }
+
+/* tabs */
+.tabs {
+  border-bottom: 1px solid var(--border);
+  display: flex; gap: 18px; margin-bottom: 16px;
+}
+.tab {
+  background: none; border: none; cursor: pointer; padding: 6px 0;
+  color: var(--text-dim); font-size: 13px; font-weight: 500;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+.tab.active { color: var(--cyan-light); border-bottom-color: var(--cyan); }
+
+/* tables */
+.table-wrap {
+  overflow-x: auto; border: 1px solid var(--border); border-radius: 8px;
+}
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+thead { background: var(--bg-card); }
+th {
+  text-align: left; padding: 10px 8px; font-size: 11px;
+  color: var(--text-dim); font-weight: 600; text-transform: uppercase;
+}
+td { padding: 8px; border-top: 1px solid var(--border); }
+th.right, td.right { text-align: right; }
+tr.row-up   { background: rgba(34,197,94,.08); }
+tr.row-down { background: rgba(239,68,68,.08); }
+.xs { font-size: 11px; }
+tr.clickable { cursor: pointer; }
+tr.clickable:hover { background: rgba(15,23,42,.5); }
+
+/* config form */
+.config-form {
+  max-width: 640px; background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: 8px; padding: 16px;
+}
+.config-row {
+  display: flex; align-items: center; gap: 12px; margin-bottom: 10px;
+}
+.config-row label { width: 220px; font-size: 13px; color: var(--text-dim); }
+.config-row input[type="number"] {
+  background: var(--bg); border: 1px solid var(--border); color: var(--text);
+  padding: 4px 8px; border-radius: 4px; width: 160px;
+  font-family: ui-monospace, monospace; font-size: 13px;
+}
+.config-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--cyan); }
+.config-row .hint { font-size: 11px; color: var(--text-muted); }
+
+/* events */
+.events-list {
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px;
+  max-height: 600px; overflow-y: auto;
+}
+.event-row {
+  border-bottom: 1px solid var(--border); padding: 6px 10px;
+  font-size: 12px; display: flex; gap: 12px;
+  font-family: ui-monospace, monospace;
+}
+.event-level { width: 56px; text-transform: uppercase; font-weight: 600; }
+.level-info  { color: var(--green-light); }
+.level-warn  { color: var(--amber-light); }
+.level-error { color: var(--red-light); }
+
+/* trade expand */
+.trade-detail { background: rgba(15,23,42,.5); }
+.trade-detail td {
+  padding: 12px; font-size: 11px; font-family: ui-monospace, monospace;
+}
+.trade-detail .grid-4 {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;
+}
+@media (max-width: 768px) { .trade-detail .grid-4 { grid-template-columns: 1fr; } }
+.trade-detail .sec-label { color: var(--text-dim); margin-bottom: 4px; }
+
+/* misc */
+.note { font-size: 13px; color: var(--text-dim); margin-bottom: 8px; }
+.empty { padding: 24px; text-align: center; color: var(--text-muted); }
+a { color: inherit; text-decoration: none; }
+a:hover { color: var(--cyan-light); }
 </style>
 </head>
-<body class="bg-slate-950 text-slate-100 min-h-screen">
-
-<div x-data="app()" x-init="init()" class="max-w-7xl mx-auto p-4 sm:p-6">
-
+<body>
+<div class="container">
   <!-- Header -->
-  <header class="flex items-center justify-between mb-6 flex-wrap gap-3">
-    <div class="flex items-center gap-3 flex-wrap">
-      <div class="text-2xl font-bold">⚡ Arb Bot</div>
-      <span class="pulse-dot" :class="wsOk ? 'bg-emerald-400 blink' : 'bg-amber-400'"></span>
-      <span class="text-xs text-slate-400" x-text="wsOk ? 'LIVE (WS)' : 'LIVE (polling 3s)'"></span>
-      <span class="text-xs px-2 py-0.5 rounded"
-        :class="config.dry_run ? 'bg-amber-900/50 text-amber-300' : 'bg-emerald-900/50 text-emerald-300'"
-        x-text="config.dry_run ? 'DRY_RUN' : 'LIVE TRADING'"></span>
-      <span class="text-xs px-2 py-0.5 rounded"
-        :class="config.enabled ? 'bg-emerald-900/50 text-emerald-300' : 'bg-slate-800 text-slate-400'"
-        x-text="config.enabled ? 'ENABLED' : 'PAUSED'"></span>
+  <div class="header">
+    <div class="title-row">
+      <div class="title">⚡ Arb Bot</div>
+      <span id="ws-dot" class="dot dot-amber"></span>
+      <span id="ws-label" class="xs text-dim">CONNECTING</span>
+      <span id="badge-dry" class="badge badge-amber">DRY_RUN</span>
+      <span id="badge-enabled" class="badge badge-green">ENABLED</span>
     </div>
-    <div class="flex gap-2">
-      <button @click="toggleEnabled()" class="px-3 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-sm"
-        x-text="config.enabled ? '⏸ Pause' : '▶ Resume'"></button>
-      <button @click="closeAll()" class="px-3 py-1.5 rounded bg-red-700 hover:bg-red-600 text-sm">
-        🛑 Close All
-      </button>
+    <div style="display:flex; gap:8px;">
+      <button id="btn-pause" class="btn btn-secondary">⏸ Pause</button>
+      <button id="btn-close-all" class="btn btn-danger">🛑 Close All</button>
     </div>
-  </header>
+  </div>
 
   <!-- Stats cards -->
-  <section class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-    <div class="bg-slate-900 rounded-lg p-4 border border-slate-800">
-      <div class="text-xs text-slate-400">Net PnL</div>
-      <div class="text-2xl font-bold mono"
-        :class="stats.net_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'"
-        x-text="fmtUsd(stats.net_pnl)"></div>
-      <div class="text-xs text-slate-500">
-        gross: <span x-text="fmtUsd(stats.gross_pnl)"></span>
-        &nbsp;·&nbsp;
-        fees: <span class="text-amber-400" x-text="fmtUsd(-stats.total_fees)"></span>
+  <div class="cards-row">
+    <div class="card">
+      <div class="card-label">Net PnL</div>
+      <div class="card-val mono" id="s-net-pnl">-</div>
+      <div class="card-sub">
+        gross: <span id="s-gross">-</span>
+        · fees: <span class="text-amber" id="s-fees">-</span>
       </div>
     </div>
-    <div class="bg-slate-900 rounded-lg p-4 border border-slate-800">
-      <div class="text-xs text-slate-400">Trades / Win Rate</div>
-      <div class="text-2xl font-bold mono text-cyan-400"
-        x-text="stats.total_trades + ' / ' + (stats.win_rate*100).toFixed(1)+'%'"></div>
-      <div class="text-xs text-slate-500">
-        open: <span x-text="stats.open_trades"></span> ·
-        err: <span class="text-red-400" x-text="stats.error_trades"></span>
+    <div class="card">
+      <div class="card-label">Trades / Win Rate</div>
+      <div class="card-val mono text-cyan" id="s-trades">-</div>
+      <div class="card-sub">
+        open: <span id="s-open">0</span> · err: <span class="text-red" id="s-err">0</span>
       </div>
     </div>
-    <div class="bg-slate-900 rounded-lg p-4 border border-slate-800">
-      <div class="text-xs text-slate-400">Open Latency (avg / p90)</div>
-      <div class="text-2xl font-bold mono text-amber-400">
-        <span x-text="stats.avg_latency_open_ms+'ms'"></span>
-        <span class="text-sm text-slate-400"> / </span>
-        <span class="text-sm" x-text="(stats.latency?.total_p90||0)+'ms'"></span>
-      </div>
-      <div class="text-xs text-slate-500">
-        p50 <span x-text="stats.latency?.total_p50||0"></span> ·
-        p99 <span x-text="stats.latency?.total_p99||0"></span>
+    <div class="card">
+      <div class="card-label">Open Latency (avg / p90)</div>
+      <div class="card-val mono text-amber" id="s-latency">-</div>
+      <div class="card-sub">
+        p50 <span id="s-p50">0</span> · p99 <span id="s-p99">0</span>
       </div>
     </div>
-    <div class="bg-slate-900 rounded-lg p-4 border border-slate-800">
-      <div class="text-xs text-slate-400">Positions / Unrealized</div>
-      <div class="text-2xl font-bold mono" x-text="positions.length"></div>
-      <div class="text-xs text-slate-500">
-        net: <span :class="unrealNet>=0?'text-emerald-400':'text-red-400'" x-text="fmtUsd(unrealNet)"></span>
+    <div class="card">
+      <div class="card-label">Positions / Unrealized</div>
+      <div class="card-val mono" id="s-positions-count">0</div>
+      <div class="card-sub">
+        net: <span id="s-unreal">-</span>
       </div>
     </div>
-  </section>
+  </div>
 
-  <!-- Fee Breakdown & Latency Breakdown -->
-  <section class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-6">
-    <div class="bg-slate-900 rounded-lg p-4 border border-slate-800">
-      <div class="text-xs text-slate-400 mb-2">Fee Breakdown (cumulative)</div>
-      <div class="space-y-1.5 text-sm mono">
-        <div class="flex justify-between">
-          <span class="text-slate-400">CEX taker (0.045%)</span>
-          <span x-text="fmtUsd(stats.cex_fees)"></span>
-        </div>
-        <div class="flex justify-between">
-          <span class="text-slate-400">DEX V3 pool</span>
-          <span x-text="fmtUsd(stats.dex_fees)"></span>
-        </div>
-        <div class="flex justify-between">
-          <span class="text-slate-400">BSC gas</span>
-          <span x-text="fmtUsd(stats.gas_fees)"></span>
-        </div>
-        <div class="flex justify-between border-t border-slate-800 pt-1.5">
-          <span class="text-slate-300">Total</span>
-          <span class="text-amber-400" x-text="fmtUsd(stats.total_fees)"></span>
-        </div>
-      </div>
+  <!-- Breakdown -->
+  <div class="cards-row-2">
+    <div class="card breakdown">
+      <div class="card-label" style="margin-bottom:8px;">Fee Breakdown (cumulative)</div>
+      <div class="row"><span class="text-dim">CEX taker</span><span class="mono" id="s-cex-fee">-</span></div>
+      <div class="row"><span class="text-dim">DEX pool</span><span class="mono" id="s-dex-fee">-</span></div>
+      <div class="row"><span class="text-dim">BSC gas</span><span class="mono" id="s-gas-fee">-</span></div>
+      <div class="row total"><span>Total</span><span class="mono text-amber" id="s-total-fee">-</span></div>
     </div>
-    <div class="bg-slate-900 rounded-lg p-4 border border-slate-800">
-      <div class="text-xs text-slate-400 mb-2">Latency Breakdown (p50 / p90)</div>
-      <div class="space-y-1.5 text-sm mono">
-        <div class="flex justify-between">
-          <span class="text-slate-400">CEX fill</span>
-          <span><span class="text-cyan-400" x-text="stats.latency?.cex_fill_p50||0"></span>
-            / <span x-text="stats.latency?.cex_fill_p90||0"></span> ms</span>
-        </div>
-        <div class="flex justify-between">
-          <span class="text-slate-400">DEX send</span>
-          <span><span class="text-cyan-400" x-text="stats.latency?.dex_send_p50||0"></span>
-            / <span x-text="stats.latency?.dex_send_p90||0"></span> ms</span>
-        </div>
-        <div class="flex justify-between">
-          <span class="text-slate-400">DEX confirm</span>
-          <span><span class="text-cyan-400" x-text="stats.latency?.dex_confirm_p50||0"></span>
-            / <span x-text="stats.latency?.dex_confirm_p90||0"></span> ms</span>
-        </div>
-        <div class="flex justify-between border-t border-slate-800 pt-1.5">
-          <span class="text-slate-300">Total</span>
-          <span class="text-amber-400">
-            <span x-text="stats.latency?.total_p50||0"></span>
-            / <span x-text="stats.latency?.total_p90||0"></span> ms
-          </span>
-        </div>
-      </div>
+    <div class="card breakdown">
+      <div class="card-label" style="margin-bottom:8px;">Latency Breakdown (p50 / p90)</div>
+      <div class="row"><span class="text-dim">CEX fill</span><span class="mono"><span class="text-cyan" id="s-lat-cex-50">0</span> / <span id="s-lat-cex-90">0</span> ms</span></div>
+      <div class="row"><span class="text-dim">DEX send</span><span class="mono"><span class="text-cyan" id="s-lat-ds-50">0</span> / <span id="s-lat-ds-90">0</span> ms</span></div>
+      <div class="row"><span class="text-dim">DEX confirm</span><span class="mono"><span class="text-cyan" id="s-lat-dc-50">0</span> / <span id="s-lat-dc-90">0</span> ms</span></div>
+      <div class="row total"><span>Total</span><span class="mono text-amber"><span id="s-lat-t-50">0</span> / <span id="s-lat-t-90">0</span> ms</span></div>
     </div>
-  </section>
+  </div>
 
   <!-- Tabs -->
-  <div class="border-b border-slate-800 mb-4 flex gap-4 text-sm">
-    <template x-for="t in tabs" :key="t">
-      <button @click="tab=t" class="pb-2 border-b-2 border-transparent"
-        :class="tab===t ? 'tab-active' : 'text-slate-400'" x-text="t"></button>
-    </template>
+  <div class="tabs" id="tabs">
+    <button class="tab active" data-tab="spreads">Live Spreads</button>
+    <button class="tab" data-tab="positions">Positions</button>
+    <button class="tab" data-tab="trades">Trades</button>
+    <button class="tab" data-tab="config">Config</button>
+    <button class="tab" data-tab="events">Events</button>
   </div>
 
   <!-- Live Spreads -->
-  <section x-show="tab==='Live Spreads'">
-    <div class="mb-2 text-sm text-slate-400">
-      监控中 <span x-text="candidates.length"></span> 个标的（链上验证：V3 Factory 4档fee + V2 Factory 双重扫描）。
-      基差 ≥ <span x-text="(config.entry_threshold*100).toFixed(2)+'%'"></span> 时开仓。
+  <section id="tab-spreads">
+    <div class="note">
+      监控中 <span id="cand-count">0</span> 个标的（链上验证：V3 Factory 4档fee + V2 Factory 双重扫描）。
+      基差 ≥ <span id="entry-threshold-display">2.50%</span> 时开仓。
     </div>
-    <div class="overflow-x-auto rounded-lg border border-slate-800">
-      <table class="w-full text-sm">
-        <thead class="bg-slate-900 text-slate-400 text-xs uppercase">
+    <div class="table-wrap">
+      <table>
+        <thead>
           <tr>
-            <th class="text-left p-2">Symbol</th>
-            <th class="text-left p-2">Ver</th>
-            <th class="text-right p-2">24h %</th>
-            <th class="text-right p-2">CEX Mid</th>
-            <th class="text-right p-2">DEX</th>
-            <th class="text-left p-2">Src</th>
-            <th class="text-right p-2">Basis %</th>
-            <th class="text-right p-2">Pool TVL</th>
-            <th class="text-right p-2">Pool Fee</th>
-            <th class="text-left p-2">Pool</th>
+            <th>Symbol</th>
+            <th>Ver</th>
+            <th class="right">24h %</th>
+            <th class="right">CEX Mid</th>
+            <th class="right">DEX</th>
+            <th>Src</th>
+            <th class="right">Basis %</th>
+            <th class="right">Pool TVL</th>
+            <th class="right">Pool Fee</th>
+            <th>Pool</th>
           </tr>
         </thead>
-        <tbody>
-          <template x-for="c in sortedCandidates()" :key="c.symbol">
-            <tr class="border-t border-slate-800"
-              :class="c.basis_live_pct > config.entry_threshold*100 ? 'row-up' :
-                     (c.basis_live_pct < -config.entry_threshold*100 ? 'row-down' : '')">
-              <td class="p-2 font-semibold" x-text="c.symbol"></td>
-              <td class="p-2">
-                <span class="text-xs px-1.5 py-0.5 rounded"
-                  :class="c.pool_version==='v3' ? 'bg-cyan-900/50 text-cyan-300' : 'bg-purple-900/50 text-purple-300'"
-                  x-text="(c.pool_version||'v3').toUpperCase()"></span>
-              </td>
-              <td class="p-2 text-right mono text-emerald-400"
-                x-text="c.change_24h_pct ? (c.change_24h_pct*100).toFixed(2)+'%' : '-'"></td>
-              <td class="p-2 text-right mono" x-text="fmtNum(c.cex_mid_live)"></td>
-              <td class="p-2 text-right mono" x-text="fmtNum(c.dex_live)"></td>
-              <td class="p-2 text-xs text-slate-500" x-text="c.dex_source || '-'"></td>
-              <td class="p-2 text-right mono"
-                :class="basisColor(c.basis_live_pct)"
-                x-text="c.basis_live_pct != null ? c.basis_live_pct.toFixed(2)+'%' : '-'"></td>
-              <td class="p-2 text-right mono text-xs"
-                :class="c.pool_tvl_usd < config.min_pool_tvl_usd ? 'text-red-400' : 'text-slate-300'"
-                x-text="c.pool_tvl_usd ? '$'+fmtCompact(c.pool_tvl_usd) : '-'"></td>
-              <td class="p-2 text-right mono text-xs"
-                x-text="c.pool_fee_pct != null ? c.pool_fee_pct.toFixed(2)+'%' : '-'"></td>
-              <td class="p-2 mono text-xs text-slate-500">
-                <a :href="'https://bscscan.com/address/'+c.pool_address"
-                   target="_blank" class="hover:text-cyan-400"
-                   x-text="shortAddr(c.pool_address)"></a>
-              </td>
-            </tr>
-          </template>
-          <tr x-show="candidates.length===0">
-            <td colspan="9" class="p-6 text-center text-slate-500">等待首次扫描…（~15秒）</td>
-          </tr>
+        <tbody id="candidates-body">
+          <tr><td colspan="10" class="empty">等待首次扫描…（~15秒）</td></tr>
         </tbody>
       </table>
     </div>
   </section>
 
   <!-- Positions -->
-  <section x-show="tab==='Positions'">
-    <div class="overflow-x-auto rounded-lg border border-slate-800">
-      <table class="w-full text-sm">
-        <thead class="bg-slate-900 text-slate-400 text-xs uppercase">
+  <section id="tab-positions" style="display:none;">
+    <div class="table-wrap">
+      <table>
+        <thead>
           <tr>
-            <th class="text-left p-2">Symbol</th>
-            <th class="text-right p-2">Opened</th>
-            <th class="text-right p-2">Entry Basis</th>
-            <th class="text-right p-2">Open Latency</th>
-            <th class="text-right p-2">Fees Paid</th>
-            <th class="text-right p-2">Unreal Gross / Net</th>
+            <th>Symbol</th>
+            <th class="right">Opened</th>
+            <th class="right">Entry Basis</th>
+            <th class="right">Open Latency</th>
+            <th class="right">Fees Paid</th>
+            <th class="right">Unreal Gross / Net</th>
           </tr>
         </thead>
-        <tbody>
-          <template x-for="p in positions" :key="p.symbol">
-            <tr class="border-t border-slate-800">
-              <td class="p-2 font-semibold" x-text="p.symbol"></td>
-              <td class="p-2 text-right text-xs" x-text="fmtTime(p.ts_open)"></td>
-              <td class="p-2 text-right mono" x-text="p.entry_basis_pct.toFixed(2)+'%'"></td>
-              <td class="p-2 text-right mono text-xs">
-                <div x-text="p.latency_ms_open+'ms'" class="text-amber-400"></div>
-                <div class="text-slate-500" style="font-size:10px">
-                  <span x-text="p.cex_fill_ms"></span>+<span x-text="p.dex_send_ms"></span>+<span x-text="p.dex_confirm_ms"></span>
-                </div>
-              </td>
-              <td class="p-2 text-right mono text-xs text-amber-400" x-text="fmtUsd(-p.fees_paid_usdt)"></td>
-              <td class="p-2 text-right mono">
-                <div :class="p.unrealized_gross>=0?'text-emerald-400':'text-red-400'" x-text="fmtUsd(p.unrealized_gross)"></div>
-                <div class="text-xs" :class="p.unrealized_net>=0?'text-emerald-300':'text-red-300'" x-text="fmtUsd(p.unrealized_net)+' net'"></div>
-              </td>
-            </tr>
-          </template>
-          <tr x-show="positions.length===0">
-            <td colspan="6" class="p-6 text-center text-slate-500">无持仓</td>
-          </tr>
+        <tbody id="positions-body">
+          <tr><td colspan="6" class="empty">无持仓</td></tr>
         </tbody>
       </table>
     </div>
   </section>
 
   <!-- Trades -->
-  <section x-show="tab==='Trades'">
-    <div class="overflow-x-auto rounded-lg border border-slate-800">
-      <table class="w-full text-sm">
-        <thead class="bg-slate-900 text-slate-400 text-xs uppercase">
+  <section id="tab-trades" style="display:none;">
+    <div class="table-wrap">
+      <table>
+        <thead>
           <tr>
-            <th class="text-left p-2">Opened</th>
-            <th class="text-left p-2">Symbol</th>
-            <th class="text-right p-2">Basis In→Out</th>
-            <th class="text-right p-2">Exec Time (Open)</th>
-            <th class="text-right p-2">Fees</th>
-            <th class="text-right p-2">Gross / Net PnL</th>
-            <th class="text-left p-2">Status</th>
-            <th class="text-left p-2">TX</th>
+            <th>Opened</th>
+            <th>Symbol</th>
+            <th class="right">Basis In→Out</th>
+            <th class="right">Open Latency</th>
+            <th class="right">Fees</th>
+            <th class="right">Gross / Net PnL</th>
+            <th>Status</th>
+            <th>TX</th>
           </tr>
         </thead>
-        <tbody>
-          <template x-for="t in trades" :key="t.id">
-            <tr class="border-t border-slate-800 hover:bg-slate-900/50" @click="expandedTrade = (expandedTrade===t.id ? null : t.id)">
-              <td class="p-2 text-xs cursor-pointer" x-text="fmtTime(t.ts_open)"></td>
-              <td class="p-2 font-semibold cursor-pointer" x-text="t.symbol"></td>
-              <td class="p-2 text-right mono text-xs">
-                <span x-text="t.entry_basis_pct?.toFixed(2)+'%'"></span>
-                <span class="text-slate-500 mx-1">→</span>
-                <span x-text="(t.exit_basis_pct!=null ? t.exit_basis_pct.toFixed(2)+'%' : '-')"></span>
-              </td>
-              <td class="p-2 text-right mono text-xs">
-                <span class="text-amber-400" x-text="(t.exec_latency_ms_open||0)+'ms'"></span>
-              </td>
-              <td class="p-2 text-right mono text-xs text-amber-400"
-                  x-text="fmtUsd(-((t.cex_fee_usdt||0)+(t.dex_fee_usdt||0)+(t.gas_fee_usdt||0)))"></td>
-              <td class="p-2 text-right mono text-xs">
-                <div :class="(t.gross_pnl_usdt||0)>=0?'text-emerald-400':'text-red-400'"
-                     x-text="fmtUsd(t.gross_pnl_usdt||0)"></div>
-                <div class="text-xs" :class="(t.realized_pnl_usdt||0)>=0?'text-emerald-300':'text-red-300'"
-                     x-text="t.realized_pnl_usdt!=null ? fmtUsd(t.realized_pnl_usdt)+' net' : '-'"></div>
-              </td>
-              <td class="p-2 text-xs">
-                <span class="px-1.5 py-0.5 rounded text-xs"
-                  :class="{
-                    'bg-emerald-900/50 text-emerald-300': t.status==='closed',
-                    'bg-amber-900/50 text-amber-300': t.status==='open',
-                    'bg-red-900/50 text-red-300': t.status==='error'||t.status==='failed'
-                  }" x-text="t.status"></span>
-              </td>
-              <td class="p-2 text-xs mono text-slate-500">
-                <a :href="'https://bscscan.com/tx/'+t.dex_tx_hash_open" target="_blank"
-                   @click.stop
-                   class="hover:text-cyan-400" x-text="shortAddr(t.dex_tx_hash_open)"></a>
-              </td>
-            </tr>
-            <tr x-show="expandedTrade===t.id" class="bg-slate-900/50">
-              <td colspan="8" class="p-3 text-xs mono">
-                <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  <div>
-                    <div class="text-slate-400 mb-1">时间戳 (open)</div>
-                    <div>signal: <span x-text="fmtTimeMs(t.t_signal)"></span></div>
-                    <div>cex sent: <span x-text="fmtTimeMs(t.t_cex_sent_open)"></span></div>
-                    <div>cex filled: <span x-text="fmtTimeMs(t.t_cex_filled_open)"></span></div>
-                    <div>dex sent: <span x-text="fmtTimeMs(t.t_dex_sent_open)"></span></div>
-                    <div>dex confirmed: <span x-text="fmtTimeMs(t.t_dex_confirmed_open)"></span></div>
-                  </div>
-                  <div>
-                    <div class="text-slate-400 mb-1">阶段耗时 (ms)</div>
-                    <div>CEX fill: <span class="text-cyan-400" x-text="t.cex_fill_latency_open||'-'"></span></div>
-                    <div>DEX send: <span class="text-cyan-400" x-text="t.dex_send_latency_open||'-'"></span></div>
-                    <div>DEX confirm: <span class="text-cyan-400" x-text="t.dex_confirm_latency_open||'-'"></span></div>
-                    <div class="mt-1">Total: <span class="text-amber-400" x-text="t.exec_latency_ms_open||'-'"></span></div>
-                  </div>
-                  <div>
-                    <div class="text-slate-400 mb-1">成交价</div>
-                    <div>CEX entry: <span x-text="fmtNum(t.cex_entry_price)"></span></div>
-                    <div>CEX exit: <span x-text="fmtNum(t.cex_exit_price)"></span></div>
-                    <div>DEX entry: <span x-text="fmtNum(t.dex_entry_price)"></span></div>
-                    <div>DEX exit: <span x-text="fmtNum(t.dex_exit_price)"></span></div>
-                  </div>
-                  <div>
-                    <div class="text-slate-400 mb-1">手续费明细</div>
-                    <div>CEX: <span x-text="fmtUsd(t.cex_fee_usdt||0)"></span></div>
-                    <div>DEX pool: <span x-text="fmtUsd(t.dex_fee_usdt||0)"></span></div>
-                    <div>BSC gas: <span x-text="fmtUsd(t.gas_fee_usdt||0)"></span></div>
-                    <div class="mt-1" x-show="t.error">
-                      <div class="text-red-400">Error:</div>
-                      <div class="text-red-300 break-all" x-text="t.error"></div>
-                    </div>
-                  </div>
-                </div>
-              </td>
-            </tr>
-          </template>
-          <tr x-show="trades.length===0">
-            <td colspan="8" class="p-6 text-center text-slate-500">暂无交易</td>
-          </tr>
+        <tbody id="trades-body">
+          <tr><td colspan="8" class="empty">暂无交易</td></tr>
         </tbody>
       </table>
     </div>
   </section>
 
   <!-- Config -->
-  <section x-show="tab==='Config'" class="max-w-2xl">
-    <div class="bg-slate-900 rounded-lg p-4 border border-slate-800 space-y-3">
-      <template x-for="f in configFields" :key="f.key">
-        <div class="flex items-center gap-3">
-          <label class="w-52 text-sm text-slate-300" x-text="f.label"></label>
-          <template x-if="f.type==='bool'">
-            <label class="inline-flex items-center gap-2">
-              <input type="checkbox" x-model="config[f.key]" @change="saveConfig()"
-                class="w-4 h-4 accent-cyan-500" />
-              <span class="text-xs text-slate-400" x-text="config[f.key] ? 'ON' : 'OFF'"></span>
-            </label>
-          </template>
-          <template x-if="f.type!=='bool'">
-            <input type="number" :step="f.step || 'any'"
-              x-model.number="config[f.key]"
-              @change="saveConfig()"
-              class="bg-slate-950 border border-slate-700 rounded px-2 py-1 w-40 mono text-sm" />
-          </template>
-          <span class="text-xs text-slate-500" x-text="f.hint||''"></span>
-        </div>
-      </template>
-    </div>
+  <section id="tab-config" style="display:none;">
+    <div class="config-form" id="config-form"></div>
   </section>
 
   <!-- Events -->
-  <section x-show="tab==='Events'">
-    <div class="bg-slate-900 rounded-lg border border-slate-800 max-h-[600px] overflow-y-auto">
-      <template x-for="e in events" :key="e.id">
-        <div class="border-b border-slate-800 p-2 text-xs mono flex gap-3">
-          <span class="text-slate-500" x-text="fmtTime(e.ts)"></span>
-          <span class="uppercase w-12"
-            :class="{
-              'text-emerald-400': e.level==='info',
-              'text-amber-400': e.level==='warn',
-              'text-red-400': e.level==='error'
-            }" x-text="e.level"></span>
-          <span class="text-slate-200 break-all" x-text="e.msg"></span>
-        </div>
-      </template>
-    </div>
+  <section id="tab-events" style="display:none;">
+    <div class="events-list" id="events-body"></div>
   </section>
-
 </div>
 
 <script>
-function app() {
-  return {
-    ws: null,
-    wsOk: false,
-    tab: 'Live Spreads',
-    tabs: ['Live Spreads','Positions','Trades','Config','Events'],
-    expandedTrade: null,
-    config: { entry_threshold:0.025, exit_threshold:0.005, position_usdt:500,
-              max_slippage:0.012, leverage:3, max_concurrent_positions:2,
-              max_exec_latency_ms:2000, dry_run:true, scan_interval_sec:900,
-              top_n_gainers:10, min_24h_gain_pct:0.05, min_pool_tvl_usd:100000,
-              max_pool_fee_bps:2500,
-              enabled:true, cex_taker_fee:0.00045, cex_maker_fee:0.00018 },
-    stats: { total_trades:0, open_trades:0, error_trades:0,
-             net_pnl:0, gross_pnl:0, total_fees:0,
-             cex_fees:0, dex_fees:0, gas_fees:0, win_rate:0,
-             avg_latency_open_ms:0, avg_latency_close_ms:0, latency:{} },
-    candidates: [],
-    positions: [],
-    trades: [],
-    events: [],
+// ---------- State ----------
+const state = {
+  wsOk: false,
+  wsGotMsg: false,
+  config: {
+    entry_threshold: 0.025, exit_threshold: 0.005, position_usdt: 500,
+    max_slippage: 0.012, leverage: 3, max_concurrent_positions: 2,
+    max_exec_latency_ms: 2000, dry_run: true, scan_interval_sec: 900,
+    top_n_gainers: 10, min_24h_gain_pct: 0.05, min_pool_tvl_usd: 100000,
+    max_pool_fee_bps: 2500, enabled: true,
+    cex_taker_fee: 0.00045, cex_maker_fee: 0.00018,
+  },
+  stats: {},
+  candidates: [],
+  positions: [],
+  trades: [],
+  events: [],
+  expandedTradeId: null,
+  configLoaded: false,
+};
 
-    configFields: [
-      {key:'enabled', type:'bool', label:'Enabled (总开关)'},
-      {key:'dry_run', type:'bool', label:'Dry Run (模拟)', hint:'开启后不实际下单'},
-      {key:'entry_threshold', type:'num', step:0.001, label:'Entry Threshold', hint:'0.025=2.5%基差开仓'},
-      {key:'exit_threshold', type:'num', step:0.001, label:'Exit Threshold'},
-      {key:'position_usdt', type:'num', step:10, label:'Position Size (USDT)'},
-      {key:'leverage', type:'num', step:1, label:'Leverage'},
-      {key:'max_slippage', type:'num', step:0.001, label:'Max Slippage', hint:'0.01=1%'},
-      {key:'max_concurrent_positions', type:'num', step:1, label:'Max Concurrent Pos'},
-      {key:'max_exec_latency_ms', type:'num', step:100, label:'Max Exec Latency (ms)'},
-      {key:'scan_interval_sec', type:'num', step:60, label:'Scan Interval (sec)'},
-      {key:'top_n_gainers', type:'num', step:1, label:'Top N Gainers'},
-      {key:'min_24h_gain_pct', type:'num', step:0.01, label:'Min 24h Gain'},
-      {key:'min_pool_tvl_usd', type:'num', step:10000, label:'Min Pool TVL (USD)', hint:'TVL<此值的池子跳过'},
-      {key:'max_pool_fee_bps', type:'num', step:500, label:'Max Pool Fee (bps)', hint:'100=0.01% 500=0.05% 2500=0.25% 10000=1%'},
-      {key:'cex_taker_fee', type:'num', step:0.0001, label:'CEX Taker Fee', hint:'0.00045=0.045%'},
-      {key:'cex_maker_fee', type:'num', step:0.0001, label:'CEX Maker Fee'},
-    ],
+const configFields = [
+  {key:'enabled', type:'bool', label:'Enabled (总开关)'},
+  {key:'dry_run', type:'bool', label:'Dry Run (模拟)', hint:'开启后不实际下单'},
+  {key:'entry_threshold', type:'num', step:0.001, label:'Entry Threshold', hint:'0.025=2.5%基差开仓'},
+  {key:'exit_threshold', type:'num', step:0.001, label:'Exit Threshold'},
+  {key:'position_usdt', type:'num', step:10, label:'Position Size (USDT)'},
+  {key:'leverage', type:'num', step:1, label:'Leverage'},
+  {key:'max_slippage', type:'num', step:0.001, label:'Max Slippage', hint:'0.01=1%'},
+  {key:'max_concurrent_positions', type:'num', step:1, label:'Max Concurrent Pos'},
+  {key:'max_exec_latency_ms', type:'num', step:100, label:'Max Exec Latency (ms)'},
+  {key:'scan_interval_sec', type:'num', step:60, label:'Scan Interval (sec)'},
+  {key:'top_n_gainers', type:'num', step:1, label:'Top N Gainers'},
+  {key:'min_24h_gain_pct', type:'num', step:0.01, label:'Min 24h Gain'},
+  {key:'min_pool_tvl_usd', type:'num', step:10000, label:'Min Pool TVL (USD)'},
+  {key:'max_pool_fee_bps', type:'num', step:500, label:'Max Pool Fee (bps)', hint:'2500=0.25%'},
+  {key:'cex_taker_fee', type:'num', step:0.0001, label:'CEX Taker Fee'},
+  {key:'cex_maker_fee', type:'num', step:0.0001, label:'CEX Maker Fee'},
+];
 
-    get unrealNet(){
-      return this.positions.reduce((s,p)=>s+(p.unrealized_net||0),0);
-    },
+// ---------- Formatters ----------
+const fmt = {
+  num(n) { if (n==null) return '-'; return (+n).toPrecision(6); },
+  usd(n) { if (n==null) return '-'; const v=+n; return (v>=0?'+$':'-$')+Math.abs(v).toFixed(2); },
+  compact(n) {
+    if (n==null) return '-';
+    if (n >= 1e9) return (n/1e9).toFixed(1)+'B';
+    if (n >= 1e6) return (n/1e6).toFixed(1)+'M';
+    if (n >= 1e3) return (n/1e3).toFixed(1)+'K';
+    return (+n).toFixed(0);
+  },
+  time(ts) { if (!ts) return '-'; return new Date(+ts).toLocaleTimeString(); },
+  timeMs(ts) {
+    if (!ts) return '-';
+    const d = new Date(+ts);
+    return d.toLocaleTimeString()+'.'+String(d.getMilliseconds()).padStart(3,'0');
+  },
+  addr(a) { if (!a) return '-'; return a.slice(0,6)+'…'+a.slice(-4); },
+  pct(v, digits=2) { if (v==null) return '-'; return (+v).toFixed(digits)+'%'; },
+};
 
-    init() {
-      this.connectWs();
-      this.loadAll();
-      setInterval(()=>this.loadAll(), 3000);
-    },
+const el = (id) => document.getElementById(id);
+const html = (s) => { const d=document.createElement('div'); d.innerHTML=s; return d.firstElementChild; };
 
-    connectWs() {
-      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      this.ws = new WebSocket(`${proto}//${location.host}/ws`);
-      this.ws.onopen = () => { this.wsOk = true; };
-      this.ws.onclose = () => { this.wsOk = false; setTimeout(()=>this.connectWs(), 2000); };
-      this.ws.onerror = () => { this.wsOk = false; };
-      this.ws.onmessage = (ev) => {
-        try {
-          const msg = JSON.parse(ev.data);
-          if (msg.type === 'init') this.config = {...this.config, ...msg.config};
-          if (msg.type === 'price') this.applyPriceUpdate(msg);
-        } catch(e){}
-      };
-    },
+// ---------- WebSocket ----------
+function connectWs() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const ws = new WebSocket(`${proto}//${location.host}/ws`);
+  ws.onopen = () => { state.wsOk = true; updateWsStatus(); };
+  ws.onclose = () => { state.wsOk = false; state.wsGotMsg=false; updateWsStatus(); setTimeout(connectWs, 2000); };
+  ws.onerror = () => { state.wsOk = false; updateWsStatus(); };
+  ws.onmessage = (ev) => {
+    state.wsGotMsg = true;
+    updateWsStatus();
+    try {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === 'init') Object.assign(state.config, msg.config);
+      if (msg.type === 'price') applyPriceUpdate(msg);
+    } catch(e){}
+  };
+}
 
-    applyPriceUpdate(msg) {
-      const row = this.candidates.find(c => c.symbol === msg.symbol);
-      if (row) {
-        row.cex_mid_live = msg.cex_mid;
-        row.dex_live = msg.dex;
-        row.dex_source = msg.dex_source;
-        row.basis_live_pct = msg.basis_pct;
-      }
-    },
-
-    async loadAll() {
-      try {
-        const [stats, cands, pos, tr, ev, cfg] = await Promise.all([
-          fetch('/api/stats').then(r=>r.json()),
-          fetch('/api/candidates').then(r=>r.json()),
-          fetch('/api/positions').then(r=>r.json()),
-          fetch('/api/trades?limit=100').then(r=>r.json()),
-          fetch('/api/events?limit=150').then(r=>r.json()),
-          fetch('/api/config').then(r=>r.json()),
-        ]);
-        this.stats = stats;
-        this.candidates = cands;
-        this.positions = pos;
-        this.trades = tr;
-        this.events = ev;
-        if (!this._configLoaded) { this.config = cfg; this._configLoaded = true; }
-      } catch(e){}
-    },
-
-    async saveConfig() {
-      await fetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify(this.config)});
-    },
-
-    async toggleEnabled() {
-      this.config.enabled = !this.config.enabled;
-      await this.saveConfig();
-    },
-
-    async closeAll() {
-      if (!confirm('确定平掉所有仓位？')) return;
-      await fetch('/api/close_all', {method:'POST'});
-    },
-
-    sortedCandidates(){
-      return [...this.candidates].sort((a,b)=>
-        Math.abs(b.basis_live_pct||0) - Math.abs(a.basis_live_pct||0));
-    },
-
-    basisColor(v){
-      if (v == null) return '';
-      if (v > this.config.entry_threshold*100) return 'text-emerald-400';
-      if (v < -this.config.entry_threshold*100) return 'text-red-400';
-      return 'text-slate-400';
-    },
-
-    fmtNum(n){ if (n==null) return '-'; return (+n).toPrecision(6); },
-    fmtUsd(n){ if (n==null) return '-'; const v=+n; return (v>=0?'+$':'-$')+Math.abs(v).toFixed(2); },
-    fmtCompact(n){
-      if (n==null) return '-';
-      if (n >= 1e9) return (n/1e9).toFixed(1)+'B';
-      if (n >= 1e6) return (n/1e6).toFixed(1)+'M';
-      if (n >= 1e3) return (n/1e3).toFixed(1)+'K';
-      return (+n).toFixed(0);
-    },
-    fmtTime(ts){ if (!ts) return '-'; return new Date(+ts).toLocaleTimeString(); },
-    fmtTimeMs(ts){ if (!ts) return '-'; const d=new Date(+ts); return d.toLocaleTimeString()+'.'+String(d.getMilliseconds()).padStart(3,'0'); },
-    shortAddr(a){ if (!a) return '-'; return a.slice(0,6)+'…'+a.slice(-4); },
+function updateWsStatus() {
+  const dot = el('ws-dot'), lbl = el('ws-label');
+  if (state.wsOk && state.wsGotMsg) {
+    dot.className = 'dot dot-green'; lbl.textContent = 'LIVE (WS)';
+  } else if (state.wsOk) {
+    dot.className = 'dot dot-green'; lbl.textContent = 'CONNECTED';
+  } else {
+    dot.className = 'dot dot-amber'; lbl.textContent = 'POLLING (3s)';
   }
 }
+
+function applyPriceUpdate(msg) {
+  const row = state.candidates.find(c => c.symbol === msg.symbol);
+  if (!row) return;
+  row.cex_mid_live = msg.cex_mid;
+  row.dex_live = msg.dex;
+  row.dex_source = msg.dex_source;
+  row.basis_live_pct = msg.basis_pct;
+  // Partial re-render - just this row's cells
+  renderCandidates();
+}
+
+// ---------- Render ----------
+function renderHeader() {
+  el('badge-dry').textContent = state.config.dry_run ? 'DRY_RUN' : 'LIVE TRADING';
+  el('badge-dry').className = 'badge ' + (state.config.dry_run ? 'badge-amber' : 'badge-green');
+  el('badge-enabled').textContent = state.config.enabled ? 'ENABLED' : 'PAUSED';
+  el('badge-enabled').className = 'badge ' + (state.config.enabled ? 'badge-green' : 'badge-slate');
+  el('btn-pause').textContent = state.config.enabled ? '⏸ Pause' : '▶ Resume';
+  el('entry-threshold-display').textContent = (state.config.entry_threshold*100).toFixed(2)+'%';
+}
+
+function renderStats() {
+  const s = state.stats || {};
+  const netPnL = s.net_pnl ?? 0;
+  const pnlCell = el('s-net-pnl');
+  pnlCell.textContent = fmt.usd(netPnL);
+  pnlCell.className = 'card-val mono ' + (netPnL >= 0 ? 'text-green' : 'text-red');
+  el('s-gross').textContent = fmt.usd(s.gross_pnl ?? 0);
+  el('s-fees').textContent = fmt.usd(-(s.total_fees ?? 0));
+  el('s-trades').textContent = `${s.total_trades ?? 0} / ${((s.win_rate ?? 0)*100).toFixed(1)}%`;
+  el('s-open').textContent = s.open_trades ?? 0;
+  el('s-err').textContent = s.error_trades ?? 0;
+  el('s-latency').textContent = `${s.avg_latency_open_ms ?? 0}ms / ${(s.latency?.total_p90 ?? 0)}ms`;
+  el('s-p50').textContent = s.latency?.total_p50 ?? 0;
+  el('s-p99').textContent = s.latency?.total_p99 ?? 0;
+  const unreal = state.positions.reduce((x,p)=>x+(p.unrealized_net||0),0);
+  const unrealEl = el('s-unreal');
+  unrealEl.textContent = fmt.usd(unreal);
+  unrealEl.className = unreal >= 0 ? 'text-green' : 'text-red';
+  el('s-positions-count').textContent = state.positions.length;
+
+  // fee
+  el('s-cex-fee').textContent = fmt.usd(s.cex_fees ?? 0);
+  el('s-dex-fee').textContent = fmt.usd(s.dex_fees ?? 0);
+  el('s-gas-fee').textContent = fmt.usd(s.gas_fees ?? 0);
+  el('s-total-fee').textContent = fmt.usd(s.total_fees ?? 0);
+
+  // latency
+  const L = s.latency || {};
+  el('s-lat-cex-50').textContent = L.cex_fill_p50 ?? 0;
+  el('s-lat-cex-90').textContent = L.cex_fill_p90 ?? 0;
+  el('s-lat-ds-50').textContent = L.dex_send_p50 ?? 0;
+  el('s-lat-ds-90').textContent = L.dex_send_p90 ?? 0;
+  el('s-lat-dc-50').textContent = L.dex_confirm_p50 ?? 0;
+  el('s-lat-dc-90').textContent = L.dex_confirm_p90 ?? 0;
+  el('s-lat-t-50').textContent = L.total_p50 ?? 0;
+  el('s-lat-t-90').textContent = L.total_p90 ?? 0;
+}
+
+function renderCandidates() {
+  const tbody = el('candidates-body');
+  el('cand-count').textContent = state.candidates.length;
+  if (state.candidates.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="10" class="empty">等待首次扫描…（~15秒）</td></tr>';
+    return;
+  }
+  const entryPct = state.config.entry_threshold * 100;
+  const sorted = [...state.candidates].sort((a,b)=>
+    Math.abs(b.basis_live_pct||0) - Math.abs(a.basis_live_pct||0));
+  tbody.innerHTML = sorted.map(c => {
+    const basis = c.basis_live_pct;
+    const rowClass = basis > entryPct ? 'row-up' : (basis < -entryPct ? 'row-down' : '');
+    const basisClass = basis == null ? 'text-dim'
+                     : (basis > entryPct ? 'text-green'
+                     : (basis < -entryPct ? 'text-red' : 'text-dim'));
+    const tvlColor = (c.pool_tvl_usd||0) < state.config.min_pool_tvl_usd ? 'text-red' : '';
+    const verBadge = c.pool_version === 'v3' ? 'badge-cyan' : 'badge-purple';
+    return `<tr class="${rowClass}">
+      <td style="font-weight:600">${c.symbol||'-'}</td>
+      <td><span class="badge ${verBadge}">${(c.pool_version||'v3').toUpperCase()}</span></td>
+      <td class="right mono text-green">${c.change_24h_pct?((c.change_24h_pct*100).toFixed(2)+'%'):'-'}</td>
+      <td class="right mono">${fmt.num(c.cex_mid_live)}</td>
+      <td class="right mono">${fmt.num(c.dex_live)}</td>
+      <td class="xs text-muted">${c.dex_source||'-'}</td>
+      <td class="right mono ${basisClass}">${basis != null ? basis.toFixed(2)+'%' : '-'}</td>
+      <td class="right mono xs ${tvlColor}">${c.pool_tvl_usd ? '$'+fmt.compact(c.pool_tvl_usd) : '-'}</td>
+      <td class="right mono xs">${c.pool_fee_pct != null ? c.pool_fee_pct.toFixed(2)+'%' : '-'}</td>
+      <td class="mono xs text-muted"><a href="https://bscscan.com/address/${c.pool_address}" target="_blank">${fmt.addr(c.pool_address)}</a></td>
+    </tr>`;
+  }).join('');
+}
+
+function renderPositions() {
+  const tbody = el('positions-body');
+  if (state.positions.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty">无持仓</td></tr>';
+    return;
+  }
+  tbody.innerHTML = state.positions.map(p => {
+    const grossCls = (p.unrealized_gross||0) >= 0 ? 'text-green' : 'text-red';
+    const netCls   = (p.unrealized_net||0)   >= 0 ? 'text-green' : 'text-red';
+    return `<tr>
+      <td style="font-weight:600">${p.symbol}</td>
+      <td class="right xs">${fmt.time(p.ts_open)}</td>
+      <td class="right mono">${p.entry_basis_pct.toFixed(2)}%</td>
+      <td class="right mono xs">
+        <div class="text-amber">${p.latency_ms_open}ms</div>
+        <div class="text-muted" style="font-size:10px">${p.cex_fill_ms}+${p.dex_send_ms}+${p.dex_confirm_ms}</div>
+      </td>
+      <td class="right mono xs text-amber">${fmt.usd(-p.fees_paid_usdt)}</td>
+      <td class="right mono">
+        <div class="${grossCls}">${fmt.usd(p.unrealized_gross)}</div>
+        <div class="xs ${netCls}">${fmt.usd(p.unrealized_net)} net</div>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+function renderTrades() {
+  const tbody = el('trades-body');
+  if (state.trades.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="8" class="empty">暂无交易</td></tr>';
+    return;
+  }
+  const parts = [];
+  state.trades.forEach(t => {
+    const statusBadge = t.status === 'closed' ? 'badge-green'
+                      : t.status === 'open' ? 'badge-amber' : 'badge-red';
+    const grossCls = (t.gross_pnl_usdt||0) >= 0 ? 'text-green' : 'text-red';
+    const netCls   = (t.realized_pnl_usdt||0) >= 0 ? 'text-green' : 'text-red';
+    const fees = (t.cex_fee_usdt||0)+(t.dex_fee_usdt||0)+(t.gas_fee_usdt||0);
+    parts.push(`<tr class="clickable" data-trade-id="${t.id}">
+      <td class="xs">${fmt.time(t.ts_open)}</td>
+      <td style="font-weight:600">${t.symbol}</td>
+      <td class="right mono xs">
+        ${t.entry_basis_pct?.toFixed(2)}%
+        <span class="text-muted">→</span>
+        ${t.exit_basis_pct != null ? t.exit_basis_pct.toFixed(2)+'%' : '-'}
+      </td>
+      <td class="right mono xs text-amber">${t.exec_latency_ms_open||0}ms</td>
+      <td class="right mono xs text-amber">${fmt.usd(-fees)}</td>
+      <td class="right mono xs">
+        <div class="${grossCls}">${fmt.usd(t.gross_pnl_usdt||0)}</div>
+        <div class="${netCls}">${t.realized_pnl_usdt!=null?fmt.usd(t.realized_pnl_usdt)+' net':'-'}</div>
+      </td>
+      <td class="xs"><span class="badge ${statusBadge}">${t.status}</span></td>
+      <td class="xs mono text-muted">
+        ${t.dex_tx_hash_open ? `<a href="https://bscscan.com/tx/${t.dex_tx_hash_open}" target="_blank" onclick="event.stopPropagation()">${fmt.addr(t.dex_tx_hash_open)}</a>` : '-'}
+      </td>
+    </tr>`);
+    if (state.expandedTradeId === t.id) {
+      parts.push(`<tr class="trade-detail"><td colspan="8">
+        <div class="grid-4">
+          <div>
+            <div class="sec-label">时间戳 (open)</div>
+            <div>signal: ${fmt.timeMs(t.t_signal)}</div>
+            <div>cex sent: ${fmt.timeMs(t.t_cex_sent_open)}</div>
+            <div>cex filled: ${fmt.timeMs(t.t_cex_filled_open)}</div>
+            <div>dex sent: ${fmt.timeMs(t.t_dex_sent_open)}</div>
+            <div>dex confirmed: ${fmt.timeMs(t.t_dex_confirmed_open)}</div>
+          </div>
+          <div>
+            <div class="sec-label">阶段耗时 (ms)</div>
+            <div>CEX fill: <span class="text-cyan">${t.cex_fill_latency_open||'-'}</span></div>
+            <div>DEX send: <span class="text-cyan">${t.dex_send_latency_open||'-'}</span></div>
+            <div>DEX confirm: <span class="text-cyan">${t.dex_confirm_latency_open||'-'}</span></div>
+            <div style="margin-top:4px">Total: <span class="text-amber">${t.exec_latency_ms_open||'-'}</span></div>
+          </div>
+          <div>
+            <div class="sec-label">成交价</div>
+            <div>CEX entry: ${fmt.num(t.cex_entry_price)}</div>
+            <div>CEX exit: ${fmt.num(t.cex_exit_price)}</div>
+            <div>DEX entry: ${fmt.num(t.dex_entry_price)}</div>
+            <div>DEX exit: ${fmt.num(t.dex_exit_price)}</div>
+          </div>
+          <div>
+            <div class="sec-label">手续费明细</div>
+            <div>CEX: ${fmt.usd(t.cex_fee_usdt||0)}</div>
+            <div>DEX pool: ${fmt.usd(t.dex_fee_usdt||0)}</div>
+            <div>BSC gas: ${fmt.usd(t.gas_fee_usdt||0)}</div>
+            ${t.error ? `<div style="margin-top:4px"><div class="text-red">Error:</div><div class="text-red" style="word-break:break-all">${t.error}</div></div>` : ''}
+          </div>
+        </div>
+      </td></tr>`);
+    }
+  });
+  tbody.innerHTML = parts.join('');
+}
+
+function renderConfig() {
+  const wrap = el('config-form');
+  wrap.innerHTML = configFields.map(f => {
+    const v = state.config[f.key];
+    let input;
+    if (f.type === 'bool') {
+      input = `<label style="display:inline-flex;gap:6px;align-items:center">
+        <input type="checkbox" data-key="${f.key}" ${v?'checked':''}>
+        <span class="xs text-dim" id="bool-label-${f.key}">${v?'ON':'OFF'}</span>
+      </label>`;
+    } else {
+      input = `<input type="number" step="${f.step||'any'}" data-key="${f.key}" value="${v}">`;
+    }
+    return `<div class="config-row">
+      <label>${f.label}</label>
+      ${input}
+      ${f.hint ? `<span class="hint">${f.hint}</span>` : ''}
+    </div>`;
+  }).join('');
+  wrap.querySelectorAll('input').forEach(inp => {
+    inp.addEventListener('change', async () => {
+      const k = inp.dataset.key;
+      const field = configFields.find(x=>x.key===k);
+      const v = field.type === 'bool' ? inp.checked : +inp.value;
+      state.config[k] = v;
+      if (field.type === 'bool') {
+        const lbl = el(`bool-label-${k}`);
+        if (lbl) lbl.textContent = v?'ON':'OFF';
+      }
+      renderHeader();
+      await saveConfig();
+    });
+  });
+}
+
+function renderEvents() {
+  el('events-body').innerHTML = state.events.map(e => {
+    const lvlCls = e.level === 'info' ? 'level-info'
+                 : e.level === 'warn' ? 'level-warn' : 'level-error';
+    return `<div class="event-row">
+      <span class="text-muted">${fmt.time(e.ts)}</span>
+      <span class="event-level ${lvlCls}">${e.level}</span>
+      <span style="word-break:break-all">${e.msg}</span>
+    </div>`;
+  }).join('');
+}
+
+function renderAll() {
+  renderHeader();
+  renderStats();
+  renderCandidates();
+  renderPositions();
+  renderTrades();
+  renderEvents();
+}
+
+// ---------- Tabs ----------
+document.querySelectorAll('.tab').forEach(t => {
+  t.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+    t.classList.add('active');
+    const tabId = t.dataset.tab;
+    ['spreads','positions','trades','config','events'].forEach(name => {
+      el('tab-'+name).style.display = name === tabId ? '' : 'none';
+    });
+    if (tabId === 'config') renderConfig();
+  });
+});
+
+// ---------- Trade row expand ----------
+el('trades-body').addEventListener('click', (ev) => {
+  const tr = ev.target.closest('tr[data-trade-id]');
+  if (!tr) return;
+  const id = +tr.dataset.tradeId;
+  state.expandedTradeId = state.expandedTradeId === id ? null : id;
+  renderTrades();
+});
+
+// ---------- Buttons ----------
+el('btn-pause').addEventListener('click', async () => {
+  state.config.enabled = !state.config.enabled;
+  await saveConfig();
+  renderHeader();
+});
+el('btn-close-all').addEventListener('click', async () => {
+  if (!confirm('确定平掉所有仓位？')) return;
+  await fetch('/api/close_all', {method:'POST'});
+});
+
+// ---------- Data loading ----------
+async function loadAll() {
+  try {
+    const [stats, cands, pos, tr, ev, cfg] = await Promise.all([
+      fetch('/api/stats').then(r=>r.json()),
+      fetch('/api/candidates').then(r=>r.json()),
+      fetch('/api/positions').then(r=>r.json()),
+      fetch('/api/trades?limit=100').then(r=>r.json()),
+      fetch('/api/events?limit=150').then(r=>r.json()),
+      fetch('/api/config').then(r=>r.json()),
+    ]);
+    state.stats = stats;
+    state.candidates = cands;
+    state.positions = pos;
+    state.trades = tr;
+    state.events = ev;
+    if (!state.configLoaded) { Object.assign(state.config, cfg); state.configLoaded = true; }
+    renderAll();
+  } catch(e) {
+    console.error('loadAll err', e);
+  }
+}
+
+async function saveConfig() {
+  await fetch('/api/config', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(state.config)
+  });
+}
+
+// ---------- Boot ----------
+connectWs();
+loadAll();
+setInterval(loadAll, 3000);
 </script>
 </body>
 </html>
