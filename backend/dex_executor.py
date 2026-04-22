@@ -16,8 +16,8 @@ from typing import Optional
 from web3 import Web3, HTTPProvider
 from eth_account import Account
 from eth_account.signers.local import LocalAccount
-from .config import STATIC, RUNTIME, PANCAKE_V3_SWAP_ROUTER, USDT
-from .abi import V3_SWAP_ROUTER_ABI, ERC20_ABI, V3_QUOTER_ABI
+from .config import STATIC, RUNTIME, PANCAKE_V3_SWAP_ROUTER, PANCAKE_V2_ROUTER, USDT
+from .abi import V3_SWAP_ROUTER_ABI, ERC20_ABI, V3_QUOTER_ABI, V2_ROUTER_ABI
 from .abi import PANCAKE_V3_QUOTER
 from .db import DB
 
@@ -50,7 +50,8 @@ class DEXExecutor:
 
         self.account: LocalAccount = Account.from_key(STATIC.wallet_private_key) \
             if STATIC.wallet_private_key else None
-        self.router = self.w3.eth.contract(
+        # V3
+        self.v3_router = self.w3.eth.contract(
             address=Web3.to_checksum_address(PANCAKE_V3_SWAP_ROUTER),
             abi=V3_SWAP_ROUTER_ABI,
         )
@@ -58,6 +59,13 @@ class DEXExecutor:
             address=Web3.to_checksum_address(PANCAKE_V3_QUOTER),
             abi=V3_QUOTER_ABI,
         )
+        # V2
+        self.v2_router = self.w3.eth.contract(
+            address=Web3.to_checksum_address(PANCAKE_V2_ROUTER),
+            abi=V2_ROUTER_ABI,
+        )
+        # 向后兼容
+        self.router = self.v3_router
 
         # nonce 缓存
         self._nonce: Optional[int] = None
@@ -116,8 +124,10 @@ class DEXExecutor:
             )
 
     # ---------- approve ----------
-    async def ensure_approved(self, token_addr: str):
-        key = token_addr.lower()
+    async def ensure_approved(self, token_addr: str, router_version: str = "v3"):
+        """对指定版本router授权。router_version = 'v2' 或 'v3'"""
+        router_addr = self.v3_router.address if router_version == "v3" else self.v2_router.address
+        key = f"{token_addr.lower()}:{router_version}"
         if key in self._approved:
             return
         if RUNTIME.dry_run:
@@ -128,15 +138,15 @@ class DEXExecutor:
             address=Web3.to_checksum_address(token_addr), abi=ERC20_ABI
         )
         allowance = await asyncio.to_thread(
-            token.functions.allowance(self.account.address, self.router.address).call
+            token.functions.allowance(self.account.address, router_addr).call
         )
         if allowance > 10**30:
             self._approved.add(key)
             return
 
-        await DB.log_event("info", f"Approving {token_addr} for router...")
+        await DB.log_event("info", f"Approving {token_addr} for {router_version} router...")
         nonce = await self._next_nonce()
-        tx = token.functions.approve(self.router.address, MAX_UINT).build_transaction({
+        tx = token.functions.approve(router_addr, MAX_UINT).build_transaction({
             "from": self.account.address,
             "nonce": nonce,
             "gas": 60000,
@@ -152,7 +162,7 @@ class DEXExecutor:
         )
         if receipt.status == 1:
             self._approved.add(key)
-            await DB.log_event("info", f"Approved {token_addr}: {tx_hash.hex()}")
+            await DB.log_event("info", f"Approved {token_addr} for {router_version}: {tx_hash.hex()}")
         else:
             await DB.log_event("error", f"Approve failed {token_addr}")
             await self._reset_nonce_from_chain()
@@ -227,15 +237,15 @@ class DEXExecutor:
         usdt_amount: float,
         expected_token_price_usd: float,
         max_slippage: float,
+        pool_version: str = "v3",
     ) -> dict:
         """
         花费 usdt_amount USDT 买入 token。
-        返回 {ok, tx_hash, latency_ms_send, latency_ms_confirm, amount_out, ...}
+        pool_version: 'v3' (默认) 或 'v2'
         """
         if RUNTIME.dry_run:
             await asyncio.sleep(0.3)
-            # 模拟真实 swap：扣掉 pool fee 的滑点
-            pool_fee_rate = pool_fee / 1_000_000   # 10000 bps -> 0.01
+            pool_fee_rate = pool_fee / 1_000_000
             effective_price_with_fee = expected_token_price_usd * (1 + pool_fee_rate)
             amount_out = usdt_amount / effective_price_with_fee
             return {
@@ -246,32 +256,85 @@ class DEXExecutor:
                 "gas_used": 180_000,
             }
 
-        await self.ensure_approved(USDT)
+        if pool_version == "v2":
+            return await self._v2_swap_exact_in(
+                USDT, token_addr, usdt_amount, expected_token_price_usd, max_slippage,
+                direction="buy"
+            )
+        else:
+            return await self._v3_swap_exact_in(
+                USDT, token_addr, pool_fee, usdt_amount, expected_token_price_usd, max_slippage,
+                direction="buy"
+            )
+
+    # ---------- 卖出现货（平仓） ----------
+    async def sell_token_for_usdt(
+        self,
+        token_addr: str,
+        pool_fee: int,
+        token_amount: float,
+        expected_token_price_usd: float,
+        max_slippage: float,
+        pool_version: str = "v3",
+    ) -> dict:
+        if RUNTIME.dry_run:
+            await asyncio.sleep(0.3)
+            pool_fee_rate = pool_fee / 1_000_000
+            effective_price_with_fee = expected_token_price_usd * (1 - pool_fee_rate)
+            amount_out_usdt = token_amount * effective_price_with_fee
+            return {
+                "ok": True, "tx_hash": "0x" + "dry" * 16,
+                "latency_ms_send": 120, "latency_ms_confirm": 500,
+                "amount_out": amount_out_usdt,
+                "effective_price": effective_price_with_fee,
+                "gas_used": 180_000,
+            }
+
+        if pool_version == "v2":
+            return await self._v2_swap_exact_in(
+                token_addr, USDT, token_amount, expected_token_price_usd, max_slippage,
+                direction="sell"
+            )
+        else:
+            return await self._v3_swap_exact_in(
+                token_addr, USDT, pool_fee, token_amount, expected_token_price_usd, max_slippage,
+                direction="sell"
+            )
+
+    # ---------- V3 swap ----------
+    async def _v3_swap_exact_in(
+        self, token_in: str, token_out: str, pool_fee: int,
+        amount_in_human: float, expected_price_usd: float, max_slippage: float,
+        direction: str,
+    ) -> dict:
+        """direction: 'buy' (USDT->token) 或 'sell' (token->USDT)"""
+        await self.ensure_approved(token_in, router_version="v3")
         await self._refresh_gas_price()
 
-        # USDT amount（BSC USDT 18位小数）
-        usdt_dec = await self._get_decimals(USDT)
-        amount_in_wei = int(usdt_amount * (10 ** usdt_dec))
+        in_dec = await self._get_decimals(token_in)
+        out_dec = await self._get_decimals(token_out)
+        amount_in_wei = int(amount_in_human * (10 ** in_dec))
 
-        # 计算 min out
-        token_dec = await self._get_decimals(token_addr)
-        expected_out = (usdt_amount / expected_token_price_usd) * (10 ** token_dec)
-        min_out = int(expected_out * (1 - max_slippage))
+        if direction == "buy":
+            expected_out_human = amount_in_human / expected_price_usd
+        else:
+            expected_out_human = amount_in_human * expected_price_usd
+        expected_out_wei = expected_out_human * (10 ** out_dec)
+        min_out = int(expected_out_wei * (1 - max_slippage))
 
         deadline = int(time.time()) + 60
         params = (
-            Web3.to_checksum_address(USDT),
-            Web3.to_checksum_address(token_addr),
+            Web3.to_checksum_address(token_in),
+            Web3.to_checksum_address(token_out),
             int(pool_fee),
             self.account.address,
             deadline,
             amount_in_wei,
             min_out,
-            0,  # sqrtPriceLimitX96=0 = 无限制（靠 min_out 防滑点）
+            0,
         )
-
         nonce = await self._next_nonce()
-        tx = self.router.functions.exactInputSingle(params).build_transaction({
+        tx = self.v3_router.functions.exactInputSingle(params).build_transaction({
             "from": self.account.address,
             "nonce": nonce,
             "gas": 250000,
@@ -279,6 +342,52 @@ class DEXExecutor:
             "chainId": 56,
             "value": 0,
         })
+        return await self._sign_send_wait(tx, token_out, out_dec, min_out,
+                                          amount_in_human, expected_price_usd, direction)
+
+    # ---------- V2 swap ----------
+    async def _v2_swap_exact_in(
+        self, token_in: str, token_out: str,
+        amount_in_human: float, expected_price_usd: float, max_slippage: float,
+        direction: str,
+    ) -> dict:
+        await self.ensure_approved(token_in, router_version="v2")
+        await self._refresh_gas_price()
+
+        in_dec = await self._get_decimals(token_in)
+        out_dec = await self._get_decimals(token_out)
+        amount_in_wei = int(amount_in_human * (10 ** in_dec))
+
+        if direction == "buy":
+            expected_out_human = amount_in_human / expected_price_usd
+        else:
+            expected_out_human = amount_in_human * expected_price_usd
+        expected_out_wei = expected_out_human * (10 ** out_dec)
+        min_out = int(expected_out_wei * (1 - max_slippage))
+
+        path = [Web3.to_checksum_address(token_in), Web3.to_checksum_address(token_out)]
+        deadline = int(time.time()) + 60
+
+        nonce = await self._next_nonce()
+        # 用 SupportingFeeOnTransferTokens，兼容有转账税的 token
+        tx = self.v2_router.functions.swapExactTokensForTokensSupportingFeeOnTransferTokens(
+            amount_in_wei, min_out, path, self.account.address, deadline
+        ).build_transaction({
+            "from": self.account.address,
+            "nonce": nonce,
+            "gas": 300000,   # V2 比 V3 用 gas 稍高
+            "gasPrice": self._gas_price,
+            "chainId": 56,
+            "value": 0,
+        })
+        return await self._sign_send_wait(tx, token_out, out_dec, min_out,
+                                          amount_in_human, expected_price_usd, direction)
+
+    # ---------- 通用：签名 -> 发送 -> 等待确认 -> 解析 ----------
+    async def _sign_send_wait(
+        self, tx: dict, token_out: str, out_dec: int, min_out: int,
+        amount_in_human: float, expected_price_usd: float, direction: str,
+    ) -> dict:
         signed = self.account.sign_transaction(tx)
 
         t0 = time.time()
@@ -291,7 +400,6 @@ class DEXExecutor:
             return {"ok": False, "error": f"send: {e}"}
         send_latency_ms = int((time.time() - t0) * 1000)
 
-        # 等待确认（但不阻塞太久）
         t1 = time.time()
         try:
             receipt = await asyncio.to_thread(
@@ -310,12 +418,17 @@ class DEXExecutor:
                     "latency_ms_confirm": confirm_latency_ms,
                     "error": "revert"}
 
-        # 解析 Transfer 事件得到真实入账 token 数量
-        actual_out_wei = self._parse_transfer_to_me(receipt, token_addr)
+        # 从 Transfer 事件解析真实入账数量
+        actual_out_wei = self._parse_transfer_to_me(receipt, token_out)
         if actual_out_wei and actual_out_wei >= min_out:
-            actual_out = actual_out_wei / (10 ** token_dec)
+            actual_out = actual_out_wei / (10 ** out_dec)
         else:
-            actual_out = min_out / (10 ** token_dec)   # 保守回退
+            actual_out = min_out / (10 ** out_dec)
+
+        if direction == "buy":
+            effective_price = amount_in_human / actual_out if actual_out > 0 else expected_price_usd
+        else:
+            effective_price = actual_out / amount_in_human if amount_in_human > 0 else expected_price_usd
 
         return {
             "ok": True,
@@ -323,99 +436,6 @@ class DEXExecutor:
             "latency_ms_send": send_latency_ms,
             "latency_ms_confirm": confirm_latency_ms,
             "amount_out": actual_out,
-            "effective_price": usdt_amount / actual_out if actual_out > 0 else expected_token_price_usd,
-            "gas_used": receipt.gasUsed,
-        }
-
-    # ---------- 卖出现货（平仓） ----------
-    async def sell_token_for_usdt(
-        self,
-        token_addr: str,
-        pool_fee: int,
-        token_amount: float,
-        expected_token_price_usd: float,
-        max_slippage: float,
-    ) -> dict:
-        if RUNTIME.dry_run:
-            await asyncio.sleep(0.3)
-            pool_fee_rate = pool_fee / 1_000_000
-            effective_price_with_fee = expected_token_price_usd * (1 - pool_fee_rate)
-            amount_out_usdt = token_amount * effective_price_with_fee
-            return {
-                "ok": True, "tx_hash": "0x" + "dry" * 16,
-                "latency_ms_send": 120, "latency_ms_confirm": 500,
-                "amount_out": amount_out_usdt,
-                "effective_price": effective_price_with_fee,
-                "gas_used": 180_000,
-            }
-
-        await self.ensure_approved(token_addr)
-        await self._refresh_gas_price()
-
-        token_dec = await self._get_decimals(token_addr)
-        usdt_dec = await self._get_decimals(USDT)
-        amount_in_wei = int(token_amount * (10 ** token_dec))
-        expected_out = token_amount * expected_token_price_usd * (10 ** usdt_dec)
-        min_out = int(expected_out * (1 - max_slippage))
-
-        deadline = int(time.time()) + 60
-        params = (
-            Web3.to_checksum_address(token_addr),
-            Web3.to_checksum_address(USDT),
-            int(pool_fee),
-            self.account.address,
-            deadline,
-            amount_in_wei,
-            min_out,
-            0,
-        )
-        nonce = await self._next_nonce()
-        tx = self.router.functions.exactInputSingle(params).build_transaction({
-            "from": self.account.address,
-            "nonce": nonce,
-            "gas": 250000,
-            "gasPrice": self._gas_price,
-            "chainId": 56,
-        })
-        signed = self.account.sign_transaction(tx)
-        t0 = time.time()
-        try:
-            tx_hash = await asyncio.to_thread(
-                self.w3.eth.send_raw_transaction, signed.rawTransaction
-            )
-        except Exception as e:
-            await self._reset_nonce_from_chain()
-            return {"ok": False, "error": f"send: {e}"}
-        send_latency_ms = int((time.time() - t0) * 1000)
-
-        t1 = time.time()
-        try:
-            receipt = await asyncio.to_thread(
-                self.w3.eth.wait_for_transaction_receipt, tx_hash, 15
-            )
-        except Exception as e:
-            return {"ok": False, "tx_hash": tx_hash.hex(),
-                    "latency_ms_send": send_latency_ms,
-                    "error": f"confirm_timeout: {e}"}
-        confirm_latency_ms = int((time.time() - t1) * 1000)
-
-        if receipt.status != 1:
-            await self._reset_nonce_from_chain()
-            return {"ok": False, "tx_hash": tx_hash.hex(), "error": "revert"}
-
-        # 解析 Transfer 事件得到真实入账 USDT 数量
-        actual_out_wei = self._parse_transfer_to_me(receipt, USDT)
-        if actual_out_wei and actual_out_wei >= min_out:
-            actual_out_usdt = actual_out_wei / (10 ** usdt_dec)
-        else:
-            actual_out_usdt = min_out / (10 ** usdt_dec)
-
-        return {
-            "ok": True,
-            "tx_hash": tx_hash.hex(),
-            "latency_ms_send": send_latency_ms,
-            "latency_ms_confirm": confirm_latency_ms,
-            "amount_out": actual_out_usdt,
-            "effective_price": actual_out_usdt / token_amount if token_amount > 0 else expected_token_price_usd,
+            "effective_price": effective_price,
             "gas_used": receipt.gasUsed,
         }

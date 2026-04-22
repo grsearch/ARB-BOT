@@ -1,23 +1,22 @@
 """
-标的扫描器 - 三级过滤：
+标的扫描器 v3 - 纯链上权威：
 
-步骤1：【一次性/每天刷新】拉取币安支持 BSC 网络的币种列表
-  - 使用已签名的 GET /sapi/v1/capital/config/getall
-  - 筛选 networkList 中 network=='BSC' 且 depositEnable==True 的币
-  - 这是"权威白名单"，确保不会选到同名诈骗币
+Step 1: 币安合约 Top N 涨幅榜（只拿 USDT 本位永续）
+Step 2: 对每个 symbol 直接在 BSC 链上搜池子：
+  - 先扫 V3 Factory 的 4 档 fee tier（token/USDT, token/WBNB）
+  - 再扫 V2 Factory 的 1 个 pair（token/USDT, token/WBNB）
+  - 优先 V3（更省 gas、可选 fee 档），V2 作为回退
+  - 用链上流动性数据估算 TVL（USDT*2 或 WBNB*2*BNB价）
+Step 3: 过滤 TVL < min_pool_tvl_usd 的池子
 
-步骤2：【每15分钟】拉取币安合约24h涨幅榜Top N
-  - USDT本位永续
-  - 与步骤1的BSC白名单求交集
+取消了币安官方"BSC充提白名单"过滤 —— 因为那是账户级数据不稳定。
+现在的原则：能在 BSC 找到真实流动池 = 可套利。
 
-步骤3：【每次扫描】对入围的币：
-  3a. 用 GeckoTerminal 查该币在BSC的最佳池子（按流动性排序）
-      - 优先 PancakeSwap V3
-      - 过滤 TVL < min_pool_tvl_usd 的池子
-  3b. 从链上 Factory.getPool 验证池子地址、fee、decimals
-  3c. 记录 pool_address, pool_fee, pool_tvl_usd 等到 candidates 表
-
-没通过任何一步的币种直接丢弃。
+关键：token 地址从哪来？
+  - 方案A：币安 capital API 的 contractAddress 字段（有时有有时没有）
+  - 方案B：GeckoTerminal search（补充）
+  - 方案C：MANUAL_OVERRIDE 手填
+  以上三路数据源合并去重。
 """
 import asyncio
 import aiohttp
@@ -30,31 +29,46 @@ from web3 import Web3
 from .config import (
     STATIC, RUNTIME, RuntimeConfig,
     BINANCE_SPOT_REST, BINANCE_FUTURES_REST, GECKO_TERMINAL_REST,
-    PANCAKE_V3_FACTORY, V3_FEE_TIERS, USDT, WBNB,
+    PANCAKE_V3_FACTORY, PANCAKE_V2_FACTORY, V3_FEE_TIERS, V2_SWAP_FEE_BPS,
+    USDT, WBNB,
 )
-from .abi import V3_FACTORY_ABI, V3_POOL_ABI, ERC20_ABI
+from .abi import V3_FACTORY_ABI, V3_POOL_ABI, V2_FACTORY_ABI, V2_PAIR_ABI, ERC20_ABI
 from .db import DB
 
 
-# 人工覆盖（若自动匹配错，可在此强制指定）
+# 人工地址覆盖（最高优先级）。如果 GeckoTerminal 和币安都找不到，可以在这里手填
 MANUAL_OVERRIDE = {
-    # "RAVE": "0x97693439ea2f0ecdeb9135881e49f354656a911c",
+    # "CAKE": "0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82",
+    # "C":    "0x...",
+    # "HOLO": "0x...",
 }
 
 
 class Scanner:
     def __init__(self, w3: Web3):
         self.w3 = w3
-        self.factory = w3.eth.contract(
+        self.v3_factory = w3.eth.contract(
             address=Web3.to_checksum_address(PANCAKE_V3_FACTORY),
             abi=V3_FACTORY_ABI,
         )
+        self.v2_factory = w3.eth.contract(
+            address=Web3.to_checksum_address(PANCAKE_V2_FACTORY),
+            abi=V2_FACTORY_ABI,
+        )
         self._session: Optional[aiohttp.ClientSession] = None
-        # BSC 白名单缓存
-        self.bsc_coins: set[str] = set()       # {'CAKE', 'BNB', ...}
-        self._bsc_coins_ts: float = 0
-        # 合约地址缓存（每个币只查一次GeckoTerminal）
-        self._address_cache: dict[str, dict] = {}  # base_asset -> {token_address, decimals, pool_address, pool_fee_bps, pool_tvl_usd, ...}
+
+        # 缓存：symbol -> token_address（避免反复查）
+        self._token_cache: dict[str, str] = {}
+        # 缓存：pool 元数据
+        self._pool_cache: dict[str, dict] = {}
+        # 币安 capital list（仅用于补充合约地址，不再作过滤门）
+        self._binance_capital: dict[str, str] = {}  # base_asset -> token_address
+        self._capital_ts: float = 0
+        # BNB/USD 参考价引用（由 engine 维护）
+        self._bnb_price_ref: Optional[dict] = None
+
+    def bind_bnb_ref(self, ref: dict):
+        self._bnb_price_ref = ref
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -68,17 +82,13 @@ class Scanner:
         if self._session and not self._session.closed:
             await self._session.close()
 
-    # =================================================================
-    # 步骤1：币安 BSC 白名单
-    # =================================================================
-    async def refresh_binance_bsc_whitelist(self):
-        """
-        每24小时刷新一次。
-        通过已签名的 /sapi/v1/capital/config/getall 读取账户支持的币种列表，
-        筛选出 networkList 里有 'BSC' 网络的币。
-        """
+    # =====================================================================
+    # 步骤1：币安 capital 信息（只当作地址来源，不再做过滤）
+    # =====================================================================
+    async def refresh_binance_capital(self):
+        """每天刷一次，拿币安 capital/config 里的 BSC contractAddress 作为地址候选。"""
         now = time.time()
-        if self.bsc_coins and now - self._bsc_coins_ts < 86400:
+        if self._binance_capital and now - self._capital_ts < 86400:
             return
 
         session = await self._get_session()
@@ -96,57 +106,32 @@ class Scanner:
             async with session.get(url, headers=headers) as r:
                 if r.status != 200:
                     text = await r.text()
-                    await DB.log_event("error", f"capital/config/getall HTTP {r.status}: {text[:200]}")
+                    await DB.log_event("warn", f"capital/config HTTP {r.status}: {text[:200]}")
                     return
                 data = await r.json()
         except Exception as e:
-            await DB.log_event("error", f"capital/config/getall error: {e}")
+            await DB.log_event("warn", f"capital/config err: {e}")
             return
 
-        coins_set = set()
-        cached_rows = []
+        result: dict[str, str] = {}
         for c in data:
             coin = c.get("coin", "")
-            if not coin or not c.get("trading", False):
-                continue
             for n in c.get("networkList", []):
-                if n.get("network") == "BSC" and n.get("depositEnable", False):
-                    coins_set.add(coin)
-                    # 币安deposit返回的contractAddress字段在部分币种上有，部分没有
-                    contract_addr = n.get("contractAddress") or ""
-                    cached_rows.append({
-                        "coin": coin, "name": c.get("name", ""),
-                        "trading": c.get("trading", False),
-                        "contract_address": contract_addr.lower(),
-                        "deposit_enable": n.get("depositEnable", False),
-                        "withdraw_enable": n.get("withdrawEnable", False),
-                    })
+                if n.get("network") == "BSC":
+                    addr = (n.get("contractAddress") or "").strip().lower()
+                    if addr.startswith("0x") and len(addr) == 42:
+                        try:
+                            result[coin] = Web3.to_checksum_address(addr)
+                        except Exception:
+                            pass
                     break
+        self._binance_capital = result
+        self._capital_ts = now
+        await DB.log_event("info", f"Binance capital: got {len(result)} BSC contract addrs (reference only)")
 
-        self.bsc_coins = coins_set
-        self._bsc_coins_ts = now
-        await DB.cache_binance_bsc_coins(cached_rows)
-        # 如果币安返回了contractAddress直接填入缓存
-        for row in cached_rows:
-            addr = row["contract_address"]
-            if not addr:
-                continue
-            # 必须是 0x 开头的 40 位hex
-            if not (addr.startswith("0x") and len(addr) == 42):
-                continue
-            try:
-                cs = Web3.to_checksum_address(addr)
-            except Exception:
-                continue
-            self._address_cache[row["coin"]] = {
-                "token_address": cs,
-                "source_contract": "binance_capital",
-            }
-        await DB.log_event("info", f"Binance BSC whitelist refreshed: {len(coins_set)} coins")
-
-    # =================================================================
-    # 步骤2：涨幅榜 Top N
-    # =================================================================
+    # =====================================================================
+    # 步骤2：涨幅榜
+    # =====================================================================
     async def fetch_top_gainers(self, top_n: int, min_gain: float) -> list[dict]:
         session = await self._get_session()
         url = f"{BINANCE_FUTURES_REST}/fapi/v1/ticker/24hr"
@@ -180,35 +165,39 @@ class Scanner:
                 break
         return results
 
-    # =================================================================
-    # 步骤3：GeckoTerminal 查 BSC 最佳池子
-    # =================================================================
-    async def find_best_pool_on_bsc(self, base_asset: str, min_tvl_usd: float) -> Optional[dict]:
-        """
-        返回 {
-            token_address, decimals, pool_address, pool_fee_bps, pool_fee_pct,
-            pool_tvl_usd, pool_24h_vol_usd, source
-        } 或 None
-        """
-        # 检查人工覆盖
+    # =====================================================================
+    # 步骤3：获取 token 地址（3 路合并）
+    # =====================================================================
+    async def get_token_address(self, base_asset: str) -> Optional[str]:
+        if base_asset in self._token_cache:
+            return self._token_cache[base_asset]
+
+        # 1) 人工覆盖
         if base_asset in MANUAL_OVERRIDE:
-            token_addr = Web3.to_checksum_address(MANUAL_OVERRIDE[base_asset])
-            return await self._build_pool_info_for_token(token_addr, min_tvl_usd)
+            try:
+                addr = Web3.to_checksum_address(MANUAL_OVERRIDE[base_asset])
+                self._token_cache[base_asset] = addr
+                return addr
+            except Exception:
+                pass
 
-        # 检查缓存（币安capital返回的contract）
-        cached = self._address_cache.get(base_asset)
-        if cached and cached.get("pool_address"):
-            # 已经完整缓存
-            return cached
-        if cached and cached.get("token_address"):
-            info = await self._build_pool_info_for_token(cached["token_address"], min_tvl_usd)
-            if info:
-                self._address_cache[base_asset] = info
-            return info
+        # 2) 币安 capital
+        if base_asset in self._binance_capital:
+            addr = self._binance_capital[base_asset]
+            self._token_cache[base_asset] = addr
+            return addr
 
-        # 向 GeckoTerminal 查询：按 symbol 搜索 BSC 上的池子
+        # 3) GeckoTerminal search
+        addr = await self._gecko_search_token(base_asset)
+        if addr:
+            self._token_cache[base_asset] = addr
+            return addr
+
+        return None
+
+    async def _gecko_search_token(self, base_asset: str) -> Optional[str]:
+        """从 GeckoTerminal 搜 BSC 上 symbol 匹配的 token，取流动性最大的。"""
         session = await self._get_session()
-        # GeckoTerminal /search/pools?query=XXX&network=bsc
         url = f"{GECKO_TERMINAL_REST}/search/pools"
         params = {"query": base_asset, "network": "bsc", "page": 1}
         try:
@@ -218,267 +207,225 @@ class Scanner:
                 data = await r.json()
         except Exception:
             return None
-
         pools = (data or {}).get("data", [])
         if not pools:
             return None
 
-        # 过滤出：base symbol 完全匹配 + PancakeSwap V3 + TVL 足够
-        candidates = []
+        # 找第一个 base symbol 匹配的池子
         for p in pools:
             attr = p.get("attributes", {}) or {}
             rels = p.get("relationships", {}) or {}
-            # 基币 symbol
-            name = attr.get("name", "")  # e.g. "CAKE / WBNB 0.25%"
+            name = attr.get("name", "")
             base_part = name.split("/")[0].strip().upper() if "/" in name else ""
             if base_part != base_asset.upper():
                 continue
-            # DEX 是 PancakeSwap V3
-            dex_id = (rels.get("dex", {}).get("data", {}) or {}).get("id", "").lower()
-            if "pancakeswap" not in dex_id and "pancake" not in dex_id:
-                continue
-            if "v3" not in dex_id:
-                continue
-            # TVL
-            tvl = float(attr.get("reserve_in_usd") or 0)
-            if tvl < min_tvl_usd:
-                continue
-            candidates.append({
-                "pool_address": attr.get("address"),
-                "tvl_usd": tvl,
-                "vol_24h_usd": float((attr.get("volume_usd") or {}).get("h24") or 0),
-                "name": name,
-                "base_token_id": (rels.get("base_token", {}).get("data", {}) or {}).get("id", ""),
-            })
+            base_id = (rels.get("base_token", {}).get("data", {}) or {}).get("id", "")
+            for prefix in ("bsc_", "bnb_", "bscmainnet_"):
+                if base_id.startswith(prefix):
+                    base_id = base_id[len(prefix):]
+                    break
+            if base_id.startswith("0x") and len(base_id) == 42:
+                try:
+                    return Web3.to_checksum_address(base_id)
+                except Exception:
+                    continue
+        return None
 
-        if not candidates:
-            return None
-
-        best = max(candidates, key=lambda x: x["tvl_usd"])
-        # GeckoTerminal base_token_id 格式通常是 'bsc_0x...'；如果不是，从池子合约自己读 token0/token1
-        token_addr_str = best["base_token_id"]
-        # 去除已知前缀
-        for prefix in ("bsc_", "bnb_", "bscmainnet_"):
-            if token_addr_str.startswith(prefix):
-                token_addr_str = token_addr_str[len(prefix):]
-                break
-
-        pool_addr_raw = best["pool_address"]
-        if not pool_addr_raw:
-            return None
-
+    # =====================================================================
+    # 步骤4：链上找最佳池子（V3 优先，V2 回退）
+    # =====================================================================
+    async def find_best_pool(self, token_addr: str, min_tvl_usd: float, max_fee_bps: int) -> Optional[dict]:
+        """
+        返回最佳池子信息：
+        {
+          version: 'v3' | 'v2',
+          pool_address, pool_fee_bps, pool_fee_pct(百分数 0.25),
+          token_decimals, pool_tvl_usd,
+          quote_token: USDT or WBNB,
+        }
+        """
+        token_cs = Web3.to_checksum_address(token_addr)
         try:
-            pool_cs = Web3.to_checksum_address(pool_addr_raw)
-        except Exception:
+            token_dec = await asyncio.to_thread(
+                self.w3.eth.contract(address=token_cs, abi=ERC20_ABI).functions.decimals().call
+            )
+        except Exception as e:
+            await DB.log_event("warn", f"decimals read fail {token_cs}: {e}")
             return None
 
-        # 尝试直接用解析到的地址验证
-        token_addr = None
-        if token_addr_str and token_addr_str.startswith("0x") and len(token_addr_str) == 42:
-            try:
-                token_addr = Web3.to_checksum_address(token_addr_str)
-            except Exception:
-                token_addr = None
+        candidates: list[dict] = []
 
-        # 如果解析失败，从池子合约读 token0/token1 再判断哪个是 base
-        if not token_addr:
-            try:
-                pc = self.w3.eth.contract(address=pool_cs, abi=V3_POOL_ABI)
-                t0 = await asyncio.to_thread(pc.functions.token0().call)
-                t1 = await asyncio.to_thread(pc.functions.token1().call)
-            except Exception:
-                return None
-            usdt_l = USDT.lower()
-            wbnb_l = WBNB.lower()
-            if t0.lower() in (usdt_l, wbnb_l):
-                token_addr = Web3.to_checksum_address(t1)
-            elif t1.lower() in (usdt_l, wbnb_l):
-                token_addr = Web3.to_checksum_address(t0)
-            else:
-                return None  # 不是 USDT/WBNB 计价池，跳过
-
-        # 从链上验证池子真实fee与token对应关系
-        info = await self._verify_pool_on_chain(pool_cs, token_addr)
-        if not info:
-            return None
-
-        info["pool_tvl_usd"] = best["tvl_usd"]
-        info["pool_24h_vol_usd"] = best["vol_24h_usd"]
-        info["source"] = "binance_bsc_list+geckoterminal"
-        self._address_cache[base_asset] = info
-        return info
-
-    async def _build_pool_info_for_token(self, token_addr: str, min_tvl_usd: float) -> Optional[dict]:
-        """对已知的 token 地址，扫描4档 V3 fee 找最佳池（回退方案）"""
-        usdt_cs = Web3.to_checksum_address(USDT)
-        wbnb_cs = Web3.to_checksum_address(WBNB)
-
-        best_pool = None
-        best_liq = 0
-        best_fee = None
-
-        for quote in (usdt_cs, wbnb_cs):
+        # -------- V3 扫描 (4 fee tiers × 2 quotes) --------
+        for quote_addr, quote_sym in ((USDT, "USDT"), (WBNB, "WBNB")):
+            quote_cs = Web3.to_checksum_address(quote_addr)
+            quote_dec = 18   # BSC USDT/WBNB 都是18位
             for fee in V3_FEE_TIERS:
+                if fee > max_fee_bps:
+                    continue
                 try:
                     pool = await asyncio.to_thread(
-                        self.factory.functions.getPool(token_addr, quote, fee).call
+                        self.v3_factory.functions.getPool(token_cs, quote_cs, fee).call
                     )
                 except Exception:
                     continue
                 if not pool or int(pool, 16) == 0:
                     continue
-                try:
-                    pc = self.w3.eth.contract(
-                        address=Web3.to_checksum_address(pool), abi=V3_POOL_ABI
-                    )
-                    liq = await asyncio.to_thread(pc.functions.liquidity().call)
-                except Exception:
+                tvl = await self._v3_pool_tvl(pool, token_cs, quote_cs, token_dec, quote_dec, quote_sym)
+                if tvl is None or tvl < min_tvl_usd:
                     continue
-                if liq > best_liq:
-                    best_liq = liq
-                    best_pool = pool
-                    best_fee = fee
+                candidates.append({
+                    "version": "v3",
+                    "pool_address": Web3.to_checksum_address(pool),
+                    "pool_fee_bps": fee,
+                    "pool_fee_pct": fee / 10000.0,
+                    "token_decimals": token_dec,
+                    "pool_tvl_usd": tvl,
+                    "quote_token": quote_cs,
+                    "quote_symbol": quote_sym,
+                })
 
-        if not best_pool:
+        # -------- V2 扫描（回退） --------
+        for quote_addr, quote_sym in ((USDT, "USDT"), (WBNB, "WBNB")):
+            quote_cs = Web3.to_checksum_address(quote_addr)
+            try:
+                pair = await asyncio.to_thread(
+                    self.v2_factory.functions.getPair(token_cs, quote_cs).call
+                )
+            except Exception:
+                continue
+            if not pair or int(pair, 16) == 0:
+                continue
+            tvl = await self._v2_pool_tvl(pair, token_cs, quote_cs, token_dec, 18, quote_sym)
+            if tvl is None or tvl < min_tvl_usd:
+                continue
+            # V2 固定 0.25%。V3 的 fee 单位是 "per 1,000,000"（2500=0.25%）
+            # V2_SWAP_FEE_BPS=25 代表 25/10000 = 0.25%，换算到 V3 单位就是 25 * 100 = 2500
+            v2_fee_in_v3_units = V2_SWAP_FEE_BPS * 100
+            if v2_fee_in_v3_units > max_fee_bps:
+                continue
+            candidates.append({
+                "version": "v2",
+                "pool_address": Web3.to_checksum_address(pair),
+                "pool_fee_bps": v2_fee_in_v3_units,
+                "pool_fee_pct": 0.25,
+                "token_decimals": token_dec,
+                "pool_tvl_usd": tvl,
+                "quote_token": quote_cs,
+                "quote_symbol": quote_sym,
+            })
+
+        if not candidates:
             return None
 
-        token_dec = await asyncio.to_thread(
-            self.w3.eth.contract(address=token_addr, abi=ERC20_ABI).functions.decimals().call
-        )
+        # 优先 USDT 报价（少一跳），其次 TVL 最大
+        usdt_pools = [c for c in candidates if c["quote_token"].lower() == USDT.lower()]
+        pool_set = usdt_pools if usdt_pools else candidates
+        best = max(pool_set, key=lambda x: x["pool_tvl_usd"])
+        return best
 
-        # 简单TVL估算：我们用 GeckoTerminal 查一次
-        tvl_usd = await self._gecko_pool_tvl(best_pool)
-        if tvl_usd is not None and tvl_usd < min_tvl_usd:
-            return None
-
-        return {
-            "token_address": token_addr,
-            "decimals": token_dec,
-            "pool_address": Web3.to_checksum_address(best_pool),
-            "pool_fee_bps": best_fee,
-            "pool_fee_pct": best_fee / 10000.0,   # 2500 -> 0.25
-            "pool_tvl_usd": tvl_usd or 0,
-            "pool_24h_vol_usd": 0,
-            "source": "onchain_factory",
-        }
-
-    async def _verify_pool_on_chain(self, pool_address: str, expected_token: str) -> Optional[dict]:
-        """验证池子确实包含预期token，并读取fee、decimals"""
+    async def _v3_pool_tvl(self, pool, token, quote, token_dec, quote_dec, quote_sym) -> Optional[float]:
+        """V3 TVL 估算：用池子当前持有的两个token余额各乘以价格求和。"""
         try:
-            pc = self.w3.eth.contract(
-                address=Web3.to_checksum_address(pool_address), abi=V3_POOL_ABI
-            )
-            token0 = await asyncio.to_thread(pc.functions.token0().call)
-            token1 = await asyncio.to_thread(pc.functions.token1().call)
-            fee = await asyncio.to_thread(pc.functions.fee().call)
-        except Exception as e:
-            await DB.log_event("warn", f"verify_pool fail {pool_address}: {e}")
-            return None
-
-        if expected_token.lower() not in (token0.lower(), token1.lower()):
-            return None
-
-        quote = token1 if token0.lower() == expected_token.lower() else token0
-        if quote.lower() not in (USDT.lower(), WBNB.lower()):
-            # 只做 token/USDT 或 token/WBNB 池（方便直接 swap）
-            return None
-
-        token_dec = await asyncio.to_thread(
-            self.w3.eth.contract(
-                address=Web3.to_checksum_address(expected_token), abi=ERC20_ABI
-            ).functions.decimals().call
-        )
-
-        return {
-            "token_address": Web3.to_checksum_address(expected_token),
-            "decimals": token_dec,
-            "pool_address": Web3.to_checksum_address(pool_address),
-            "pool_fee_bps": fee,
-            "pool_fee_pct": fee / 10000.0,
-            "quote_token": quote.lower(),
-        }
-
-    async def _gecko_pool_tvl(self, pool_address: str) -> Optional[float]:
-        """查单个池子的TVL"""
-        session = await self._get_session()
-        url = f"{GECKO_TERMINAL_REST}/networks/bsc/pools/{pool_address}"
-        try:
-            async with session.get(url) as r:
-                if r.status != 200:
-                    return None
-                data = await r.json()
+            token_ct = self.w3.eth.contract(address=Web3.to_checksum_address(token), abi=ERC20_ABI)
+            quote_ct = self.w3.eth.contract(address=Web3.to_checksum_address(quote), abi=ERC20_ABI)
+            bal_token = await asyncio.to_thread(token_ct.functions.balanceOf(Web3.to_checksum_address(pool)).call)
+            bal_quote = await asyncio.to_thread(quote_ct.functions.balanceOf(Web3.to_checksum_address(pool)).call)
         except Exception:
             return None
-        attr = ((data or {}).get("data", {}) or {}).get("attributes", {}) or {}
-        return float(attr.get("reserve_in_usd") or 0)
+        quote_amount_usd = self._quote_to_usd(bal_quote, quote_dec, quote_sym)
+        if quote_amount_usd is None:
+            return None
+        # TVL ≈ 2 × quote_amount_usd （假定两侧价值平衡，V3 集中流动性不完全平衡但近似可用）
+        return quote_amount_usd * 2
 
-    # =================================================================
-    # 顶层：一次完整扫描
-    # =================================================================
+    async def _v2_pool_tvl(self, pair, token, quote, token_dec, quote_dec, quote_sym) -> Optional[float]:
+        """V2 TVL：直接 getReserves() 算。"""
+        try:
+            pc = self.w3.eth.contract(address=Web3.to_checksum_address(pair), abi=V2_PAIR_ABI)
+            r0, r1, _ = await asyncio.to_thread(pc.functions.getReserves().call)
+            t0 = await asyncio.to_thread(pc.functions.token0().call)
+        except Exception:
+            return None
+        # 判断 quote 是 token0 还是 token1
+        if t0.lower() == quote.lower():
+            reserve_quote = r0
+        else:
+            reserve_quote = r1
+        quote_usd = self._quote_to_usd(reserve_quote, quote_dec, quote_sym)
+        if quote_usd is None:
+            return None
+        return quote_usd * 2
+
+    def _quote_to_usd(self, wei_amount: int, decimals: int, symbol: str) -> Optional[float]:
+        amount = wei_amount / (10 ** decimals)
+        if symbol == "USDT":
+            return amount
+        if symbol == "WBNB":
+            bnb_usd = (self._bnb_price_ref or {}).get("price", 0) if self._bnb_price_ref else 0
+            if not bnb_usd:
+                bnb_usd = 600   # fallback，TVL估算用；实际PnL会用真实BNB价
+            return amount * bnb_usd
+        return None
+
+    # =====================================================================
+    # 顶层：完整扫描
+    # =====================================================================
     async def run_once(self, rt: RuntimeConfig) -> list[dict]:
         await DB.log_event("info", "--- Scan start ---")
+        await self.refresh_binance_capital()
 
-        # 1. 刷新BSC白名单（若过期）
-        await self.refresh_binance_bsc_whitelist()
-        if not self.bsc_coins:
-            await DB.log_event("warn", "BSC whitelist empty, aborting scan")
-            return []
-
-        # 2. 涨幅榜
         gainers = await self.fetch_top_gainers(rt.top_n_gainers, rt.min_24h_gain_pct)
         await DB.log_event("info", f"Top gainers (>= {rt.min_24h_gain_pct*100:.1f}%): {len(gainers)}")
 
-        # 3. 与 BSC 白名单求交集
-        cross = [g for g in gainers if g["base_asset"] in self.bsc_coins]
-        skipped_no_bsc = [g["base_asset"] for g in gainers if g["base_asset"] not in self.bsc_coins]
-        if skipped_no_bsc:
-            await DB.log_event("info", f"Skip (not on BSC): {','.join(skipped_no_bsc)}")
-
-        # 4. 对每个币找最佳池子
         confirmed: list[dict] = []
-        for g in cross:
+        skipped = []
+        for g in gainers:
+            base = g["base_asset"]
             try:
-                info = await self.find_best_pool_on_bsc(g["base_asset"], rt.min_pool_tvl_usd)
-                if not info:
-                    await DB.log_event("info", f"Skip (no BSC pool or TVL too low): {g['symbol']}")
+                token_addr = await self.get_token_address(base)
+                if not token_addr:
+                    skipped.append(f"{base}(no_addr)")
                     continue
 
-                # 过滤高 fee 池子：套利净利润 = basis - cex_fee*2 - dex_fee*2 - gas
-                # 如 fee=1%，往返 2% 就吃光 2.5% basis 的大部分，不赚
-                if info["pool_fee_bps"] > rt.max_pool_fee_bps:
-                    await DB.log_event(
-                        "info",
-                        f"Skip (pool fee {info['pool_fee_pct']:.2f}% > max {rt.max_pool_fee_bps/10000:.2f}%): {g['symbol']}"
-                    )
+                pool = await self.find_best_pool(token_addr, rt.min_pool_tvl_usd, rt.max_pool_fee_bps)
+                if not pool:
+                    skipped.append(f"{base}(no_pool/tvl_low)")
                     continue
 
                 cand = {
                     "symbol": g["symbol"],
-                    "base_asset": g["base_asset"],
-                    "token_address": info["token_address"],
-                    "pool_address": info["pool_address"],
-                    "pool_fee": info["pool_fee_bps"],
-                    "pool_fee_pct": info["pool_fee_pct"],
-                    "pool_tvl_usd": info.get("pool_tvl_usd", 0),
-                    "pool_24h_vol_usd": info.get("pool_24h_vol_usd", 0),
-                    "decimals": info["decimals"],
+                    "base_asset": base,
+                    "token_address": token_addr,
+                    "pool_address": pool["pool_address"],
+                    "pool_fee": pool["pool_fee_bps"],
+                    "pool_fee_pct": pool["pool_fee_pct"],
+                    "pool_tvl_usd": pool["pool_tvl_usd"],
+                    "pool_24h_vol_usd": None,
+                    "decimals": pool["token_decimals"],
                     "change_24h_pct": g["change_24h_pct"],
                     "last_cex_price": g["last_cex_price"],
                     "last_dex_price": None,
                     "last_basis_pct": None,
-                    "source": info.get("source", ""),
+                    "pool_version": pool["version"],
+                    "quote_token": pool["quote_token"],
+                    "source": "onchain",
                 }
                 await DB.upsert_candidate(cand)
                 confirmed.append(cand)
                 await DB.log_event(
                     "info",
-                    f"OK {g['symbol']} TVL=${info.get('pool_tvl_usd',0):,.0f} "
-                    f"fee={info['pool_fee_pct']:.2f}% pool={info['pool_address'][:10]}..."
+                    f"OK {g['symbol']} [{pool['version'].upper()}] "
+                    f"TVL=${pool['pool_tvl_usd']:,.0f} fee={pool['pool_fee_pct']:.2f}% "
+                    f"quote={pool['quote_symbol']} pool={pool['pool_address'][:10]}..."
                 )
             except Exception as e:
-                await DB.log_event("error", f"Scan err for {g['symbol']}: {e}")
+                skipped.append(f"{base}(err:{e})")
+                await DB.log_event("error", f"Scan err {base}: {e}")
 
-        # 只有非空扫描才清理旧数据；空扫描保留上轮结果（避免 flash-empty）
+        if skipped:
+            await DB.log_event("info", f"Skipped: {', '.join(skipped[:20])}")
+
+        # 空扫描不覆盖
         if confirmed:
             kept = {c["symbol"] for c in confirmed}
             existing = await DB.fetchall("SELECT symbol FROM candidates", ())
@@ -487,12 +434,13 @@ class Scanner:
                     await DB.execute("DELETE FROM candidates WHERE symbol=?", (row["symbol"],))
             await DB.log_event("info", f"--- Scan done: {len(confirmed)} candidates ---")
         else:
-            await DB.log_event("warn", "--- Scan done: 0 candidates this round, keeping previous ---")
+            await DB.log_event("warn", "--- Scan done: 0 candidates, keeping previous ---")
         return confirmed
 
 
-async def run_scanner_loop(w3: Web3, on_update):
+async def run_scanner_loop(w3: Web3, on_update, bnb_price_ref: dict):
     scanner = Scanner(w3)
+    scanner.bind_bnb_ref(bnb_price_ref)
     try:
         while True:
             if RUNTIME.enabled:

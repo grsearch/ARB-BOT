@@ -91,6 +91,7 @@ CREATE TABLE IF NOT EXISTS candidates (
     pool_address TEXT,
     pool_fee INTEGER,
     pool_fee_pct REAL,           -- 0.05 等
+    pool_version TEXT,           -- 'v2' | 'v3'
     pool_tvl_usd REAL,
     pool_24h_vol_usd REAL,
     decimals INTEGER,
@@ -98,7 +99,7 @@ CREATE TABLE IF NOT EXISTS candidates (
     last_cex_price REAL,
     last_dex_price REAL,
     last_basis_pct REAL,
-    source TEXT,                 -- 'binance_capital+birdeye' etc
+    source TEXT,
     last_update INTEGER
 );
 
@@ -189,11 +190,12 @@ class DB:
         await DB.execute(
             """INSERT OR REPLACE INTO candidates
             (symbol, base_asset, token_address, pool_address, pool_fee, pool_fee_pct,
-             pool_tvl_usd, pool_24h_vol_usd, decimals, change_24h_pct,
+             pool_version, pool_tvl_usd, pool_24h_vol_usd, decimals, change_24h_pct,
              last_cex_price, last_dex_price, last_basis_pct, source, last_update)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (c.get("symbol"), c.get("base_asset"), c.get("token_address"),
              c.get("pool_address"), c.get("pool_fee"), c.get("pool_fee_pct"),
+             c.get("pool_version", "v3"),
              c.get("pool_tvl_usd"), c.get("pool_24h_vol_usd"),
              c.get("decimals"), c.get("change_24h_pct"),
              c.get("last_cex_price"), c.get("last_dex_price"),

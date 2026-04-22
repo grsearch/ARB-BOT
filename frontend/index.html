@@ -155,7 +155,7 @@
   <!-- Live Spreads -->
   <section x-show="tab==='Live Spreads'">
     <div class="mb-2 text-sm text-slate-400">
-      监控中 <span x-text="candidates.length"></span> 个标的（三级过滤：BSC白名单→涨幅榜→池子TVL）。
+      监控中 <span x-text="candidates.length"></span> 个标的（链上验证：V3 Factory 4档fee + V2 Factory 双重扫描）。
       基差 ≥ <span x-text="(config.entry_threshold*100).toFixed(2)+'%'"></span> 时开仓。
     </div>
     <div class="overflow-x-auto rounded-lg border border-slate-800">
@@ -163,6 +163,7 @@
         <thead class="bg-slate-900 text-slate-400 text-xs uppercase">
           <tr>
             <th class="text-left p-2">Symbol</th>
+            <th class="text-left p-2">Ver</th>
             <th class="text-right p-2">24h %</th>
             <th class="text-right p-2">CEX Mid</th>
             <th class="text-right p-2">DEX</th>
@@ -179,6 +180,11 @@
               :class="c.basis_live_pct > config.entry_threshold*100 ? 'row-up' :
                      (c.basis_live_pct < -config.entry_threshold*100 ? 'row-down' : '')">
               <td class="p-2 font-semibold" x-text="c.symbol"></td>
+              <td class="p-2">
+                <span class="text-xs px-1.5 py-0.5 rounded"
+                  :class="c.pool_version==='v3' ? 'bg-cyan-900/50 text-cyan-300' : 'bg-purple-900/50 text-purple-300'"
+                  x-text="(c.pool_version||'v3').toUpperCase()"></span>
+              </td>
               <td class="p-2 text-right mono text-emerald-400"
                 x-text="c.change_24h_pct ? (c.change_24h_pct*100).toFixed(2)+'%' : '-'"></td>
               <td class="p-2 text-right mono" x-text="fmtNum(c.cex_mid_live)"></td>
@@ -193,7 +199,7 @@
               <td class="p-2 text-right mono text-xs"
                 x-text="c.pool_fee_pct != null ? c.pool_fee_pct.toFixed(2)+'%' : '-'"></td>
               <td class="p-2 mono text-xs text-slate-500">
-                <a :href="'https://pancakeswap.finance/info/v3/bsc/pairs/'+c.pool_address"
+                <a :href="'https://bscscan.com/address/'+c.pool_address"
                    target="_blank" class="hover:text-cyan-400"
                    x-text="shortAddr(c.pool_address)"></a>
               </td>

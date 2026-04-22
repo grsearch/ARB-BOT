@@ -95,3 +95,52 @@ V3_QUOTER_ABI = [
         {"name":"gasEstimate","type":"uint256"},
      ]},
 ]
+
+# -------- PancakeSwap V2 --------
+V2_FACTORY_ABI = [
+    {"name":"getPair","type":"function","stateMutability":"view",
+     "inputs":[{"name":"tokenA","type":"address"},
+               {"name":"tokenB","type":"address"}],
+     "outputs":[{"name":"pair","type":"address"}]},
+]
+
+V2_PAIR_ABI = [
+    {"name":"getReserves","type":"function","stateMutability":"view","inputs":[],
+     "outputs":[
+        {"name":"_reserve0","type":"uint112"},
+        {"name":"_reserve1","type":"uint112"},
+        {"name":"_blockTimestampLast","type":"uint32"},
+     ]},
+    {"name":"token0","type":"function","stateMutability":"view",
+     "inputs":[],"outputs":[{"name":"","type":"address"}]},
+    {"name":"token1","type":"function","stateMutability":"view",
+     "inputs":[],"outputs":[{"name":"","type":"address"}]},
+]
+
+V2_ROUTER_ABI = [
+    {"name":"swapExactTokensForTokensSupportingFeeOnTransferTokens",
+     "type":"function","stateMutability":"nonpayable",
+     "inputs":[
+        {"name":"amountIn","type":"uint256"},
+        {"name":"amountOutMin","type":"uint256"},
+        {"name":"path","type":"address[]"},
+        {"name":"to","type":"address"},
+        {"name":"deadline","type":"uint256"},
+     ],
+     "outputs":[]},
+    {"name":"swapExactTokensForTokens","type":"function","stateMutability":"nonpayable",
+     "inputs":[
+        {"name":"amountIn","type":"uint256"},
+        {"name":"amountOutMin","type":"uint256"},
+        {"name":"path","type":"address[]"},
+        {"name":"to","type":"address"},
+        {"name":"deadline","type":"uint256"},
+     ],
+     "outputs":[{"name":"amounts","type":"uint256[]"}]},
+    {"name":"getAmountsOut","type":"function","stateMutability":"view",
+     "inputs":[
+        {"name":"amountIn","type":"uint256"},
+        {"name":"path","type":"address[]"},
+     ],
+     "outputs":[{"name":"amounts","type":"uint256[]"}]},
+]

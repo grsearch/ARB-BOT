@@ -37,6 +37,7 @@ class Position:
     pool_address: str
     pool_fee: int          # bps: 2500=0.25%
     pool_fee_pct: float    # 0.0025
+    pool_version: str      # 'v2' | 'v3'
 
     ts_open: int
     entry_basis: float
@@ -199,10 +200,12 @@ class ArbEngine:
             cex_fee = cex_notional * RUNTIME.cex_taker_fee
 
             # 2) DEX 买入（按 CEX 实际成交的名义价值）
+            pool_version = cand.get("pool_version", "v3")
             t_dex_sent = _ms()
             dex_res = await self.dex_exec.buy_token_with_usdt(
                 cand["token_address"], cand["pool_fee"],
                 cex_notional, dex_px, RUNTIME.max_slippage,
+                pool_version=pool_version,
             )
             t_dex_confirmed = _ms()
 
@@ -270,6 +273,7 @@ class ArbEngine:
                 symbol=symbol, token_address=cand["token_address"],
                 pool_address=cand["pool_address"], pool_fee=cand["pool_fee"],
                 pool_fee_pct=cand.get("pool_fee_pct", 0) / 100,
+                pool_version=pool_version,
                 ts_open=t_signal, entry_basis=basis,
                 position_usdt=RUNTIME.position_usdt,
                 cex_avg_entry=cex_avg, cex_filled_qty=cex_qty,
@@ -338,7 +342,8 @@ class ArbEngine:
             t_cex_sent = _ms()
             dex_task = asyncio.create_task(self.dex_exec.sell_token_for_usdt(
                 pos.token_address, pos.pool_fee, pos.dex_amount_token,
-                dex_now, RUNTIME.max_slippage))
+                dex_now, RUNTIME.max_slippage,
+                pool_version=pos.pool_version))
             cex_task = asyncio.create_task(self.cex_exec.close_short(
                 symbol, pos.cex_filled_qty, cex_now))
 

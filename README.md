@@ -4,7 +4,8 @@
 
 ## 核心特性
 
-- **三级筛选扫描**：币安官方 BSC 白名单 → Top Gainers → PancakeSwap 池子 TVL，每 15 分钟刷新
+- **纯链上扫描**：币安合约 Top Gainers → 链上 V3 Factory 4档fee + V2 Factory 双重扫描 → TVL 过滤
+- **V2 + V3 双支持**：优先 PancakeSwap V3（更省 gas、可选 fee 档），V2 作为回退，自动根据池子选择 Router
 - **双通道价格流**：Birdeye WebSocket 主 + 链上 `slot0` 兜底（>3s 无更新自动切链上）
 - **低延迟 DEX 执行**：Keep-Alive RPC session、Nonce 预缓存、Gas 预热、永久 approve、V3 `exactInputSingle` 直调
 - **精细时间戳**：每笔交易记录 `signal → cex_sent → cex_filled → dex_sent → dex_confirmed` 五个时间点
@@ -64,7 +65,7 @@ arb_bot/
 │   ├── config.py            # 全局配置 + 热更新参数
 │   ├── abi.py               # 精简 ABI
 │   ├── db.py                # SQLite 持久化
-│   ├── scanner.py           # 三级筛选扫描器
+│   ├── scanner.py           # 纯链上 V3+V2 扫描
 │   ├── cex_feed.py          # 币安 WS bookTicker
 │   ├── dex_feed.py          # Birdeye WS + 链上 slot0
 │   ├── cex_executor.py      # 币安合约下单
