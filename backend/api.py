@@ -38,6 +38,7 @@ class ConfigUpdate(BaseModel):
     top_n_gainers: int | None = None
     min_24h_gain_pct: float | None = None
     min_pool_tvl_usd: float | None = None
+    max_pool_fee_bps: int | None = None
     enabled: bool | None = None
     cex_taker_fee: float | None = None
     cex_maker_fee: float | None = None

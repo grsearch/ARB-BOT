@@ -443,6 +443,15 @@ class Scanner:
                     await DB.log_event("info", f"Skip (no BSC pool or TVL too low): {g['symbol']}")
                     continue
 
+                # 过滤高 fee 池子：套利净利润 = basis - cex_fee*2 - dex_fee*2 - gas
+                # 如 fee=1%，往返 2% 就吃光 2.5% basis 的大部分，不赚
+                if info["pool_fee_bps"] > rt.max_pool_fee_bps:
+                    await DB.log_event(
+                        "info",
+                        f"Skip (pool fee {info['pool_fee_pct']:.2f}% > max {rt.max_pool_fee_bps/10000:.2f}%): {g['symbol']}"
+                    )
+                    continue
+
                 cand = {
                     "symbol": g["symbol"],
                     "base_asset": g["base_asset"],
@@ -469,14 +478,16 @@ class Scanner:
             except Exception as e:
                 await DB.log_event("error", f"Scan err for {g['symbol']}: {e}")
 
-        # 清理不再在列表中的旧candidates
-        kept = {c["symbol"] for c in confirmed}
-        existing = await DB.fetchall("SELECT symbol FROM candidates", ())
-        for row in existing:
-            if row["symbol"] not in kept:
-                await DB.execute("DELETE FROM candidates WHERE symbol=?", (row["symbol"],))
-
-        await DB.log_event("info", f"--- Scan done: {len(confirmed)} candidates ---")
+        # 只有非空扫描才清理旧数据；空扫描保留上轮结果（避免 flash-empty）
+        if confirmed:
+            kept = {c["symbol"] for c in confirmed}
+            existing = await DB.fetchall("SELECT symbol FROM candidates", ())
+            for row in existing:
+                if row["symbol"] not in kept:
+                    await DB.execute("DELETE FROM candidates WHERE symbol=?", (row["symbol"],))
+            await DB.log_event("info", f"--- Scan done: {len(confirmed)} candidates ---")
+        else:
+            await DB.log_event("warn", "--- Scan done: 0 candidates this round, keeping previous ---")
         return confirmed
 
 

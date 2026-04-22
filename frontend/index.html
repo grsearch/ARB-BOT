@@ -31,8 +31,8 @@
   <header class="flex items-center justify-between mb-6 flex-wrap gap-3">
     <div class="flex items-center gap-3 flex-wrap">
       <div class="text-2xl font-bold">⚡ Arb Bot</div>
-      <span class="pulse-dot blink" :class="wsOk ? 'bg-emerald-400' : 'bg-red-500'"></span>
-      <span class="text-xs text-slate-400" x-text="wsOk ? 'LIVE' : 'DISCONNECTED'"></span>
+      <span class="pulse-dot" :class="wsOk ? 'bg-emerald-400 blink' : 'bg-amber-400'"></span>
+      <span class="text-xs text-slate-400" x-text="wsOk ? 'LIVE (WS)' : 'LIVE (polling 3s)'"></span>
       <span class="text-xs px-2 py-0.5 rounded"
         :class="config.dry_run ? 'bg-amber-900/50 text-amber-300' : 'bg-emerald-900/50 text-emerald-300'"
         x-text="config.dry_run ? 'DRY_RUN' : 'LIVE TRADING'"></span>
@@ -403,6 +403,7 @@ function app() {
               max_slippage:0.012, leverage:3, max_concurrent_positions:2,
               max_exec_latency_ms:2000, dry_run:true, scan_interval_sec:900,
               top_n_gainers:10, min_24h_gain_pct:0.05, min_pool_tvl_usd:100000,
+              max_pool_fee_bps:2500,
               enabled:true, cex_taker_fee:0.00045, cex_maker_fee:0.00018 },
     stats: { total_trades:0, open_trades:0, error_trades:0,
              net_pnl:0, gross_pnl:0, total_fees:0,
@@ -427,6 +428,7 @@ function app() {
       {key:'top_n_gainers', type:'num', step:1, label:'Top N Gainers'},
       {key:'min_24h_gain_pct', type:'num', step:0.01, label:'Min 24h Gain'},
       {key:'min_pool_tvl_usd', type:'num', step:10000, label:'Min Pool TVL (USD)', hint:'TVL<此值的池子跳过'},
+      {key:'max_pool_fee_bps', type:'num', step:500, label:'Max Pool Fee (bps)', hint:'100=0.01% 500=0.05% 2500=0.25% 10000=1%'},
       {key:'cex_taker_fee', type:'num', step:0.0001, label:'CEX Taker Fee', hint:'0.00045=0.045%'},
       {key:'cex_maker_fee', type:'num', step:0.0001, label:'CEX Maker Fee'},
     ],

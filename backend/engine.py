@@ -96,6 +96,9 @@ class ArbEngine:
         await self._broadcast_price(symbol)
 
     async def on_candidates_update(self, candidates: list[dict]):
+        # 空列表不覆盖（防止扫描临时失败导致 engine 候选丢失）
+        if not candidates:
+            return
         self.candidates = {c["symbol"]: c for c in candidates}
         # CEX 订阅：所有候选 + BNBUSDT
         symbols = set(self.candidates.keys()) | {"BNBUSDT"}

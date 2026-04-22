@@ -57,6 +57,7 @@ class RuntimeConfig:
     top_n_gainers: int = 10
     min_24h_gain_pct: float = 0.05
     min_pool_tvl_usd: float = 100_000
+    max_pool_fee_bps: int = 2500        # 最大 0.25% 池子 fee，1% 的池子不碰
     enabled: bool = True
     # 手续费
     cex_taker_fee: float = BINANCE_TAKER_FEE

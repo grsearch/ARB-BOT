@@ -93,6 +93,10 @@ async def amain():
     config = uvicorn.Config(
         app, host=STATIC.dashboard_host, port=STATIC.dashboard_port,
         log_level="info", access_log=False,
+        proxy_headers=True,
+        forwarded_allow_ips="*",  # 信任 Cloudflare Tunnel / localtunnel 等反代
+        ws_ping_interval=20,
+        ws_ping_timeout=20,
     )
     server = uvicorn.Server(config)
 

@@ -234,11 +234,16 @@ class DEXExecutor:
         """
         if RUNTIME.dry_run:
             await asyncio.sleep(0.3)
+            # 模拟真实 swap：扣掉 pool fee 的滑点
+            pool_fee_rate = pool_fee / 1_000_000   # 10000 bps -> 0.01
+            effective_price_with_fee = expected_token_price_usd * (1 + pool_fee_rate)
+            amount_out = usdt_amount / effective_price_with_fee
             return {
                 "ok": True, "tx_hash": "0x" + "dry" * 16,
                 "latency_ms_send": 120, "latency_ms_confirm": 500,
-                "amount_out": usdt_amount / expected_token_price_usd,
-                "effective_price": expected_token_price_usd,
+                "amount_out": amount_out,
+                "effective_price": effective_price_with_fee,
+                "gas_used": 180_000,
             }
 
         await self.ensure_approved(USDT)
@@ -333,11 +338,15 @@ class DEXExecutor:
     ) -> dict:
         if RUNTIME.dry_run:
             await asyncio.sleep(0.3)
+            pool_fee_rate = pool_fee / 1_000_000
+            effective_price_with_fee = expected_token_price_usd * (1 - pool_fee_rate)
+            amount_out_usdt = token_amount * effective_price_with_fee
             return {
                 "ok": True, "tx_hash": "0x" + "dry" * 16,
                 "latency_ms_send": 120, "latency_ms_confirm": 500,
-                "amount_out": token_amount * expected_token_price_usd,
-                "effective_price": expected_token_price_usd,
+                "amount_out": amount_out_usdt,
+                "effective_price": effective_price_with_fee,
+                "gas_used": 180_000,
             }
 
         await self.ensure_approved(token_addr)
