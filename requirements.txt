@@ -1,0 +1,11 @@
+web3==6.20.3
+eth-account==0.13.4
+ccxt==4.4.50
+aiohttp==3.10.10
+websockets==13.1
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+python-dotenv==1.0.1
+pydantic==2.9.2
+aiosqlite==0.20.0
+requests==2.32.3

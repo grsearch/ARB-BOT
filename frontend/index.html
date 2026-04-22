@@ -1,0 +1,531 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Arb Bot Dashboard</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script defer src="https://unpkg.com/alpinejs@3.14.1/dist/cdn.min.js"></script>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .pulse-dot { width:8px; height:8px; border-radius:99px; display:inline-block; }
+  .blink { animation: blink 1.2s infinite; }
+  @keyframes blink { 0%,100%{opacity:.4} 50%{opacity:1} }
+  .row-up   { background: rgba(34,197,94,.08); }
+  .row-down { background: rgba(239,68,68,.08); }
+  .tab-active { border-color:#22d3ee; color:#22d3ee; }
+  .latency-bar-wrap {
+    display:flex; gap:1px; width:100%; max-width:200px;
+    border-radius:2px; overflow:hidden; background:#1e293b;
+  }
+  .latency-bar-seg { height:8px; min-width:1px; }
+</style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen">
+
+<div x-data="app()" x-init="init()" class="max-w-7xl mx-auto p-4 sm:p-6">
+
+  <!-- Header -->
+  <header class="flex items-center justify-between mb-6 flex-wrap gap-3">
+    <div class="flex items-center gap-3 flex-wrap">
+      <div class="text-2xl font-bold">⚡ Arb Bot</div>
+      <span class="pulse-dot blink" :class="wsOk ? 'bg-emerald-400' : 'bg-red-500'"></span>
+      <span class="text-xs text-slate-400" x-text="wsOk ? 'LIVE' : 'DISCONNECTED'"></span>
+      <span class="text-xs px-2 py-0.5 rounded"
+        :class="config.dry_run ? 'bg-amber-900/50 text-amber-300' : 'bg-emerald-900/50 text-emerald-300'"
+        x-text="config.dry_run ? 'DRY_RUN' : 'LIVE TRADING'"></span>
+      <span class="text-xs px-2 py-0.5 rounded"
+        :class="config.enabled ? 'bg-emerald-900/50 text-emerald-300' : 'bg-slate-800 text-slate-400'"
+        x-text="config.enabled ? 'ENABLED' : 'PAUSED'"></span>
+    </div>
+    <div class="flex gap-2">
+      <button @click="toggleEnabled()" class="px-3 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-sm"
+        x-text="config.enabled ? '⏸ Pause' : '▶ Resume'"></button>
+      <button @click="closeAll()" class="px-3 py-1.5 rounded bg-red-700 hover:bg-red-600 text-sm">
+        🛑 Close All
+      </button>
+    </div>
+  </header>
+
+  <!-- Stats cards -->
+  <section class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+    <div class="bg-slate-900 rounded-lg p-4 border border-slate-800">
+      <div class="text-xs text-slate-400">Net PnL</div>
+      <div class="text-2xl font-bold mono"
+        :class="stats.net_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'"
+        x-text="fmtUsd(stats.net_pnl)"></div>
+      <div class="text-xs text-slate-500">
+        gross: <span x-text="fmtUsd(stats.gross_pnl)"></span>
+        &nbsp;·&nbsp;
+        fees: <span class="text-amber-400" x-text="fmtUsd(-stats.total_fees)"></span>
+      </div>
+    </div>
+    <div class="bg-slate-900 rounded-lg p-4 border border-slate-800">
+      <div class="text-xs text-slate-400">Trades / Win Rate</div>
+      <div class="text-2xl font-bold mono text-cyan-400"
+        x-text="stats.total_trades + ' / ' + (stats.win_rate*100).toFixed(1)+'%'"></div>
+      <div class="text-xs text-slate-500">
+        open: <span x-text="stats.open_trades"></span> ·
+        err: <span class="text-red-400" x-text="stats.error_trades"></span>
+      </div>
+    </div>
+    <div class="bg-slate-900 rounded-lg p-4 border border-slate-800">
+      <div class="text-xs text-slate-400">Open Latency (avg / p90)</div>
+      <div class="text-2xl font-bold mono text-amber-400">
+        <span x-text="stats.avg_latency_open_ms+'ms'"></span>
+        <span class="text-sm text-slate-400"> / </span>
+        <span class="text-sm" x-text="(stats.latency?.total_p90||0)+'ms'"></span>
+      </div>
+      <div class="text-xs text-slate-500">
+        p50 <span x-text="stats.latency?.total_p50||0"></span> ·
+        p99 <span x-text="stats.latency?.total_p99||0"></span>
+      </div>
+    </div>
+    <div class="bg-slate-900 rounded-lg p-4 border border-slate-800">
+      <div class="text-xs text-slate-400">Positions / Unrealized</div>
+      <div class="text-2xl font-bold mono" x-text="positions.length"></div>
+      <div class="text-xs text-slate-500">
+        net: <span :class="unrealNet>=0?'text-emerald-400':'text-red-400'" x-text="fmtUsd(unrealNet)"></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- Fee Breakdown & Latency Breakdown -->
+  <section class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-6">
+    <div class="bg-slate-900 rounded-lg p-4 border border-slate-800">
+      <div class="text-xs text-slate-400 mb-2">Fee Breakdown (cumulative)</div>
+      <div class="space-y-1.5 text-sm mono">
+        <div class="flex justify-between">
+          <span class="text-slate-400">CEX taker (0.045%)</span>
+          <span x-text="fmtUsd(stats.cex_fees)"></span>
+        </div>
+        <div class="flex justify-between">
+          <span class="text-slate-400">DEX V3 pool</span>
+          <span x-text="fmtUsd(stats.dex_fees)"></span>
+        </div>
+        <div class="flex justify-between">
+          <span class="text-slate-400">BSC gas</span>
+          <span x-text="fmtUsd(stats.gas_fees)"></span>
+        </div>
+        <div class="flex justify-between border-t border-slate-800 pt-1.5">
+          <span class="text-slate-300">Total</span>
+          <span class="text-amber-400" x-text="fmtUsd(stats.total_fees)"></span>
+        </div>
+      </div>
+    </div>
+    <div class="bg-slate-900 rounded-lg p-4 border border-slate-800">
+      <div class="text-xs text-slate-400 mb-2">Latency Breakdown (p50 / p90)</div>
+      <div class="space-y-1.5 text-sm mono">
+        <div class="flex justify-between">
+          <span class="text-slate-400">CEX fill</span>
+          <span><span class="text-cyan-400" x-text="stats.latency?.cex_fill_p50||0"></span>
+            / <span x-text="stats.latency?.cex_fill_p90||0"></span> ms</span>
+        </div>
+        <div class="flex justify-between">
+          <span class="text-slate-400">DEX send</span>
+          <span><span class="text-cyan-400" x-text="stats.latency?.dex_send_p50||0"></span>
+            / <span x-text="stats.latency?.dex_send_p90||0"></span> ms</span>
+        </div>
+        <div class="flex justify-between">
+          <span class="text-slate-400">DEX confirm</span>
+          <span><span class="text-cyan-400" x-text="stats.latency?.dex_confirm_p50||0"></span>
+            / <span x-text="stats.latency?.dex_confirm_p90||0"></span> ms</span>
+        </div>
+        <div class="flex justify-between border-t border-slate-800 pt-1.5">
+          <span class="text-slate-300">Total</span>
+          <span class="text-amber-400">
+            <span x-text="stats.latency?.total_p50||0"></span>
+            / <span x-text="stats.latency?.total_p90||0"></span> ms
+          </span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Tabs -->
+  <div class="border-b border-slate-800 mb-4 flex gap-4 text-sm">
+    <template x-for="t in tabs" :key="t">
+      <button @click="tab=t" class="pb-2 border-b-2 border-transparent"
+        :class="tab===t ? 'tab-active' : 'text-slate-400'" x-text="t"></button>
+    </template>
+  </div>
+
+  <!-- Live Spreads -->
+  <section x-show="tab==='Live Spreads'">
+    <div class="mb-2 text-sm text-slate-400">
+      监控中 <span x-text="candidates.length"></span> 个标的（三级过滤：BSC白名单→涨幅榜→池子TVL）。
+      基差 ≥ <span x-text="(config.entry_threshold*100).toFixed(2)+'%'"></span> 时开仓。
+    </div>
+    <div class="overflow-x-auto rounded-lg border border-slate-800">
+      <table class="w-full text-sm">
+        <thead class="bg-slate-900 text-slate-400 text-xs uppercase">
+          <tr>
+            <th class="text-left p-2">Symbol</th>
+            <th class="text-right p-2">24h %</th>
+            <th class="text-right p-2">CEX Mid</th>
+            <th class="text-right p-2">DEX</th>
+            <th class="text-left p-2">Src</th>
+            <th class="text-right p-2">Basis %</th>
+            <th class="text-right p-2">Pool TVL</th>
+            <th class="text-right p-2">Pool Fee</th>
+            <th class="text-left p-2">Pool</th>
+          </tr>
+        </thead>
+        <tbody>
+          <template x-for="c in sortedCandidates()" :key="c.symbol">
+            <tr class="border-t border-slate-800"
+              :class="c.basis_live_pct > config.entry_threshold*100 ? 'row-up' :
+                     (c.basis_live_pct < -config.entry_threshold*100 ? 'row-down' : '')">
+              <td class="p-2 font-semibold" x-text="c.symbol"></td>
+              <td class="p-2 text-right mono text-emerald-400"
+                x-text="c.change_24h_pct ? (c.change_24h_pct*100).toFixed(2)+'%' : '-'"></td>
+              <td class="p-2 text-right mono" x-text="fmtNum(c.cex_mid_live)"></td>
+              <td class="p-2 text-right mono" x-text="fmtNum(c.dex_live)"></td>
+              <td class="p-2 text-xs text-slate-500" x-text="c.dex_source || '-'"></td>
+              <td class="p-2 text-right mono"
+                :class="basisColor(c.basis_live_pct)"
+                x-text="c.basis_live_pct != null ? c.basis_live_pct.toFixed(2)+'%' : '-'"></td>
+              <td class="p-2 text-right mono text-xs"
+                :class="c.pool_tvl_usd < config.min_pool_tvl_usd ? 'text-red-400' : 'text-slate-300'"
+                x-text="c.pool_tvl_usd ? '$'+fmtCompact(c.pool_tvl_usd) : '-'"></td>
+              <td class="p-2 text-right mono text-xs"
+                x-text="c.pool_fee_pct != null ? c.pool_fee_pct.toFixed(2)+'%' : '-'"></td>
+              <td class="p-2 mono text-xs text-slate-500">
+                <a :href="'https://pancakeswap.finance/info/v3/bsc/pairs/'+c.pool_address"
+                   target="_blank" class="hover:text-cyan-400"
+                   x-text="shortAddr(c.pool_address)"></a>
+              </td>
+            </tr>
+          </template>
+          <tr x-show="candidates.length===0">
+            <td colspan="9" class="p-6 text-center text-slate-500">等待首次扫描…（~15秒）</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Positions -->
+  <section x-show="tab==='Positions'">
+    <div class="overflow-x-auto rounded-lg border border-slate-800">
+      <table class="w-full text-sm">
+        <thead class="bg-slate-900 text-slate-400 text-xs uppercase">
+          <tr>
+            <th class="text-left p-2">Symbol</th>
+            <th class="text-right p-2">Opened</th>
+            <th class="text-right p-2">Entry Basis</th>
+            <th class="text-right p-2">Open Latency</th>
+            <th class="text-right p-2">Fees Paid</th>
+            <th class="text-right p-2">Unreal Gross / Net</th>
+          </tr>
+        </thead>
+        <tbody>
+          <template x-for="p in positions" :key="p.symbol">
+            <tr class="border-t border-slate-800">
+              <td class="p-2 font-semibold" x-text="p.symbol"></td>
+              <td class="p-2 text-right text-xs" x-text="fmtTime(p.ts_open)"></td>
+              <td class="p-2 text-right mono" x-text="p.entry_basis_pct.toFixed(2)+'%'"></td>
+              <td class="p-2 text-right mono text-xs">
+                <div x-text="p.latency_ms_open+'ms'" class="text-amber-400"></div>
+                <div class="text-slate-500" style="font-size:10px">
+                  <span x-text="p.cex_fill_ms"></span>+<span x-text="p.dex_send_ms"></span>+<span x-text="p.dex_confirm_ms"></span>
+                </div>
+              </td>
+              <td class="p-2 text-right mono text-xs text-amber-400" x-text="fmtUsd(-p.fees_paid_usdt)"></td>
+              <td class="p-2 text-right mono">
+                <div :class="p.unrealized_gross>=0?'text-emerald-400':'text-red-400'" x-text="fmtUsd(p.unrealized_gross)"></div>
+                <div class="text-xs" :class="p.unrealized_net>=0?'text-emerald-300':'text-red-300'" x-text="fmtUsd(p.unrealized_net)+' net'"></div>
+              </td>
+            </tr>
+          </template>
+          <tr x-show="positions.length===0">
+            <td colspan="6" class="p-6 text-center text-slate-500">无持仓</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Trades -->
+  <section x-show="tab==='Trades'">
+    <div class="overflow-x-auto rounded-lg border border-slate-800">
+      <table class="w-full text-sm">
+        <thead class="bg-slate-900 text-slate-400 text-xs uppercase">
+          <tr>
+            <th class="text-left p-2">Opened</th>
+            <th class="text-left p-2">Symbol</th>
+            <th class="text-right p-2">Basis In→Out</th>
+            <th class="text-right p-2">Exec Time (Open)</th>
+            <th class="text-right p-2">Fees</th>
+            <th class="text-right p-2">Gross / Net PnL</th>
+            <th class="text-left p-2">Status</th>
+            <th class="text-left p-2">TX</th>
+          </tr>
+        </thead>
+        <tbody>
+          <template x-for="t in trades" :key="t.id">
+            <tr class="border-t border-slate-800 hover:bg-slate-900/50" @click="expandedTrade = (expandedTrade===t.id ? null : t.id)">
+              <td class="p-2 text-xs cursor-pointer" x-text="fmtTime(t.ts_open)"></td>
+              <td class="p-2 font-semibold cursor-pointer" x-text="t.symbol"></td>
+              <td class="p-2 text-right mono text-xs">
+                <span x-text="t.entry_basis_pct?.toFixed(2)+'%'"></span>
+                <span class="text-slate-500 mx-1">→</span>
+                <span x-text="(t.exit_basis_pct!=null ? t.exit_basis_pct.toFixed(2)+'%' : '-')"></span>
+              </td>
+              <td class="p-2 text-right mono text-xs">
+                <span class="text-amber-400" x-text="(t.exec_latency_ms_open||0)+'ms'"></span>
+              </td>
+              <td class="p-2 text-right mono text-xs text-amber-400"
+                  x-text="fmtUsd(-((t.cex_fee_usdt||0)+(t.dex_fee_usdt||0)+(t.gas_fee_usdt||0)))"></td>
+              <td class="p-2 text-right mono text-xs">
+                <div :class="(t.gross_pnl_usdt||0)>=0?'text-emerald-400':'text-red-400'"
+                     x-text="fmtUsd(t.gross_pnl_usdt||0)"></div>
+                <div class="text-xs" :class="(t.realized_pnl_usdt||0)>=0?'text-emerald-300':'text-red-300'"
+                     x-text="t.realized_pnl_usdt!=null ? fmtUsd(t.realized_pnl_usdt)+' net' : '-'"></div>
+              </td>
+              <td class="p-2 text-xs">
+                <span class="px-1.5 py-0.5 rounded text-xs"
+                  :class="{
+                    'bg-emerald-900/50 text-emerald-300': t.status==='closed',
+                    'bg-amber-900/50 text-amber-300': t.status==='open',
+                    'bg-red-900/50 text-red-300': t.status==='error'||t.status==='failed'
+                  }" x-text="t.status"></span>
+              </td>
+              <td class="p-2 text-xs mono text-slate-500">
+                <a :href="'https://bscscan.com/tx/'+t.dex_tx_hash_open" target="_blank"
+                   @click.stop
+                   class="hover:text-cyan-400" x-text="shortAddr(t.dex_tx_hash_open)"></a>
+              </td>
+            </tr>
+            <tr x-show="expandedTrade===t.id" class="bg-slate-900/50">
+              <td colspan="8" class="p-3 text-xs mono">
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  <div>
+                    <div class="text-slate-400 mb-1">时间戳 (open)</div>
+                    <div>signal: <span x-text="fmtTimeMs(t.t_signal)"></span></div>
+                    <div>cex sent: <span x-text="fmtTimeMs(t.t_cex_sent_open)"></span></div>
+                    <div>cex filled: <span x-text="fmtTimeMs(t.t_cex_filled_open)"></span></div>
+                    <div>dex sent: <span x-text="fmtTimeMs(t.t_dex_sent_open)"></span></div>
+                    <div>dex confirmed: <span x-text="fmtTimeMs(t.t_dex_confirmed_open)"></span></div>
+                  </div>
+                  <div>
+                    <div class="text-slate-400 mb-1">阶段耗时 (ms)</div>
+                    <div>CEX fill: <span class="text-cyan-400" x-text="t.cex_fill_latency_open||'-'"></span></div>
+                    <div>DEX send: <span class="text-cyan-400" x-text="t.dex_send_latency_open||'-'"></span></div>
+                    <div>DEX confirm: <span class="text-cyan-400" x-text="t.dex_confirm_latency_open||'-'"></span></div>
+                    <div class="mt-1">Total: <span class="text-amber-400" x-text="t.exec_latency_ms_open||'-'"></span></div>
+                  </div>
+                  <div>
+                    <div class="text-slate-400 mb-1">成交价</div>
+                    <div>CEX entry: <span x-text="fmtNum(t.cex_entry_price)"></span></div>
+                    <div>CEX exit: <span x-text="fmtNum(t.cex_exit_price)"></span></div>
+                    <div>DEX entry: <span x-text="fmtNum(t.dex_entry_price)"></span></div>
+                    <div>DEX exit: <span x-text="fmtNum(t.dex_exit_price)"></span></div>
+                  </div>
+                  <div>
+                    <div class="text-slate-400 mb-1">手续费明细</div>
+                    <div>CEX: <span x-text="fmtUsd(t.cex_fee_usdt||0)"></span></div>
+                    <div>DEX pool: <span x-text="fmtUsd(t.dex_fee_usdt||0)"></span></div>
+                    <div>BSC gas: <span x-text="fmtUsd(t.gas_fee_usdt||0)"></span></div>
+                    <div class="mt-1" x-show="t.error">
+                      <div class="text-red-400">Error:</div>
+                      <div class="text-red-300 break-all" x-text="t.error"></div>
+                    </div>
+                  </div>
+                </div>
+              </td>
+            </tr>
+          </template>
+          <tr x-show="trades.length===0">
+            <td colspan="8" class="p-6 text-center text-slate-500">暂无交易</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Config -->
+  <section x-show="tab==='Config'" class="max-w-2xl">
+    <div class="bg-slate-900 rounded-lg p-4 border border-slate-800 space-y-3">
+      <template x-for="f in configFields" :key="f.key">
+        <div class="flex items-center gap-3">
+          <label class="w-52 text-sm text-slate-300" x-text="f.label"></label>
+          <template x-if="f.type==='bool'">
+            <label class="inline-flex items-center gap-2">
+              <input type="checkbox" x-model="config[f.key]" @change="saveConfig()"
+                class="w-4 h-4 accent-cyan-500" />
+              <span class="text-xs text-slate-400" x-text="config[f.key] ? 'ON' : 'OFF'"></span>
+            </label>
+          </template>
+          <template x-if="f.type!=='bool'">
+            <input type="number" :step="f.step || 'any'"
+              x-model.number="config[f.key]"
+              @change="saveConfig()"
+              class="bg-slate-950 border border-slate-700 rounded px-2 py-1 w-40 mono text-sm" />
+          </template>
+          <span class="text-xs text-slate-500" x-text="f.hint||''"></span>
+        </div>
+      </template>
+    </div>
+  </section>
+
+  <!-- Events -->
+  <section x-show="tab==='Events'">
+    <div class="bg-slate-900 rounded-lg border border-slate-800 max-h-[600px] overflow-y-auto">
+      <template x-for="e in events" :key="e.id">
+        <div class="border-b border-slate-800 p-2 text-xs mono flex gap-3">
+          <span class="text-slate-500" x-text="fmtTime(e.ts)"></span>
+          <span class="uppercase w-12"
+            :class="{
+              'text-emerald-400': e.level==='info',
+              'text-amber-400': e.level==='warn',
+              'text-red-400': e.level==='error'
+            }" x-text="e.level"></span>
+          <span class="text-slate-200 break-all" x-text="e.msg"></span>
+        </div>
+      </template>
+    </div>
+  </section>
+
+</div>
+
+<script>
+function app() {
+  return {
+    ws: null,
+    wsOk: false,
+    tab: 'Live Spreads',
+    tabs: ['Live Spreads','Positions','Trades','Config','Events'],
+    expandedTrade: null,
+    config: { entry_threshold:0.025, exit_threshold:0.005, position_usdt:500,
+              max_slippage:0.012, leverage:3, max_concurrent_positions:2,
+              max_exec_latency_ms:2000, dry_run:true, scan_interval_sec:900,
+              top_n_gainers:10, min_24h_gain_pct:0.05, min_pool_tvl_usd:100000,
+              enabled:true, cex_taker_fee:0.00045, cex_maker_fee:0.00018 },
+    stats: { total_trades:0, open_trades:0, error_trades:0,
+             net_pnl:0, gross_pnl:0, total_fees:0,
+             cex_fees:0, dex_fees:0, gas_fees:0, win_rate:0,
+             avg_latency_open_ms:0, avg_latency_close_ms:0, latency:{} },
+    candidates: [],
+    positions: [],
+    trades: [],
+    events: [],
+
+    configFields: [
+      {key:'enabled', type:'bool', label:'Enabled (总开关)'},
+      {key:'dry_run', type:'bool', label:'Dry Run (模拟)', hint:'开启后不实际下单'},
+      {key:'entry_threshold', type:'num', step:0.001, label:'Entry Threshold', hint:'0.025=2.5%基差开仓'},
+      {key:'exit_threshold', type:'num', step:0.001, label:'Exit Threshold'},
+      {key:'position_usdt', type:'num', step:10, label:'Position Size (USDT)'},
+      {key:'leverage', type:'num', step:1, label:'Leverage'},
+      {key:'max_slippage', type:'num', step:0.001, label:'Max Slippage', hint:'0.01=1%'},
+      {key:'max_concurrent_positions', type:'num', step:1, label:'Max Concurrent Pos'},
+      {key:'max_exec_latency_ms', type:'num', step:100, label:'Max Exec Latency (ms)'},
+      {key:'scan_interval_sec', type:'num', step:60, label:'Scan Interval (sec)'},
+      {key:'top_n_gainers', type:'num', step:1, label:'Top N Gainers'},
+      {key:'min_24h_gain_pct', type:'num', step:0.01, label:'Min 24h Gain'},
+      {key:'min_pool_tvl_usd', type:'num', step:10000, label:'Min Pool TVL (USD)', hint:'TVL<此值的池子跳过'},
+      {key:'cex_taker_fee', type:'num', step:0.0001, label:'CEX Taker Fee', hint:'0.00045=0.045%'},
+      {key:'cex_maker_fee', type:'num', step:0.0001, label:'CEX Maker Fee'},
+    ],
+
+    get unrealNet(){
+      return this.positions.reduce((s,p)=>s+(p.unrealized_net||0),0);
+    },
+
+    init() {
+      this.connectWs();
+      this.loadAll();
+      setInterval(()=>this.loadAll(), 3000);
+    },
+
+    connectWs() {
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      this.ws = new WebSocket(`${proto}//${location.host}/ws`);
+      this.ws.onopen = () => { this.wsOk = true; };
+      this.ws.onclose = () => { this.wsOk = false; setTimeout(()=>this.connectWs(), 2000); };
+      this.ws.onerror = () => { this.wsOk = false; };
+      this.ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === 'init') this.config = {...this.config, ...msg.config};
+          if (msg.type === 'price') this.applyPriceUpdate(msg);
+        } catch(e){}
+      };
+    },
+
+    applyPriceUpdate(msg) {
+      const row = this.candidates.find(c => c.symbol === msg.symbol);
+      if (row) {
+        row.cex_mid_live = msg.cex_mid;
+        row.dex_live = msg.dex;
+        row.dex_source = msg.dex_source;
+        row.basis_live_pct = msg.basis_pct;
+      }
+    },
+
+    async loadAll() {
+      try {
+        const [stats, cands, pos, tr, ev, cfg] = await Promise.all([
+          fetch('/api/stats').then(r=>r.json()),
+          fetch('/api/candidates').then(r=>r.json()),
+          fetch('/api/positions').then(r=>r.json()),
+          fetch('/api/trades?limit=100').then(r=>r.json()),
+          fetch('/api/events?limit=150').then(r=>r.json()),
+          fetch('/api/config').then(r=>r.json()),
+        ]);
+        this.stats = stats;
+        this.candidates = cands;
+        this.positions = pos;
+        this.trades = tr;
+        this.events = ev;
+        if (!this._configLoaded) { this.config = cfg; this._configLoaded = true; }
+      } catch(e){}
+    },
+
+    async saveConfig() {
+      await fetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(this.config)});
+    },
+
+    async toggleEnabled() {
+      this.config.enabled = !this.config.enabled;
+      await this.saveConfig();
+    },
+
+    async closeAll() {
+      if (!confirm('确定平掉所有仓位？')) return;
+      await fetch('/api/close_all', {method:'POST'});
+    },
+
+    sortedCandidates(){
+      return [...this.candidates].sort((a,b)=>
+        Math.abs(b.basis_live_pct||0) - Math.abs(a.basis_live_pct||0));
+    },
+
+    basisColor(v){
+      if (v == null) return '';
+      if (v > this.config.entry_threshold*100) return 'text-emerald-400';
+      if (v < -this.config.entry_threshold*100) return 'text-red-400';
+      return 'text-slate-400';
+    },
+
+    fmtNum(n){ if (n==null) return '-'; return (+n).toPrecision(6); },
+    fmtUsd(n){ if (n==null) return '-'; const v=+n; return (v>=0?'+$':'-$')+Math.abs(v).toFixed(2); },
+    fmtCompact(n){
+      if (n==null) return '-';
+      if (n >= 1e9) return (n/1e9).toFixed(1)+'B';
+      if (n >= 1e6) return (n/1e6).toFixed(1)+'M';
+      if (n >= 1e3) return (n/1e3).toFixed(1)+'K';
+      return (+n).toFixed(0);
+    },
+    fmtTime(ts){ if (!ts) return '-'; return new Date(+ts).toLocaleTimeString(); },
+    fmtTimeMs(ts){ if (!ts) return '-'; const d=new Date(+ts); return d.toLocaleTimeString()+'.'+String(d.getMilliseconds()).padStart(3,'0'); },
+    shortAddr(a){ if (!a) return '-'; return a.slice(0,6)+'…'+a.slice(-4); },
+  }
+}
+</script>
+</body>
+</html>
