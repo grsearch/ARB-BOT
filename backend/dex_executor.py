@@ -104,8 +104,15 @@ class DEXExecutor:
             return
         try:
             gp = await asyncio.to_thread(lambda: self.w3.eth.gas_price)
-            # 对套利场景，我们愿意多付 30% 抢速度
-            self._gas_price = int(gp * 1.3)
+            # 对套利场景，提高 gas price 让验证者优先打包
+            # gas_boost_multiplier 可在 Dashboard 运行时调整（1.0=不加价，2.0=2倍）
+            boost = getattr(RUNTIME, "gas_boost_multiplier", 1.5)
+            try:
+                boost = float(boost)
+                boost = max(1.0, min(boost, 10.0))   # 夹在 1.0~10.0 之间，防误操作
+            except Exception:
+                boost = 1.5
+            self._gas_price = int(gp * boost)
             self._gas_refresh_ts = now
         except Exception as e:
             await DB.log_event("warn", f"gas refresh fail: {e}")

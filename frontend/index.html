@@ -240,6 +240,13 @@ a:hover { color: var(--cyan-light); }
       <div class="row"><span class="text-dim">DEX send</span><span class="mono"><span class="text-cyan" id="s-lat-ds-50">0</span> / <span id="s-lat-ds-90">0</span> ms</span></div>
       <div class="row"><span class="text-dim">DEX confirm</span><span class="mono"><span class="text-cyan" id="s-lat-dc-50">0</span> / <span id="s-lat-dc-90">0</span> ms</span></div>
       <div class="row total"><span>Total</span><span class="mono text-amber"><span id="s-lat-t-50">0</span> / <span id="s-lat-t-90">0</span> ms</span></div>
+      <div class="row" style="margin-top:6px;padding-top:6px;border-top:1px solid var(--border)">
+        <span class="text-dim">Gas price (now × boost)</span>
+        <span class="mono">
+          <span class="text-cyan" id="s-gas-gwei">0</span> gwei
+          <span class="text-muted" style="margin-left:6px">× <span id="s-gas-boost">1.5</span></span>
+        </span>
+      </div>
     </div>
   </div>
 
@@ -248,6 +255,7 @@ a:hover { color: var(--cyan-light); }
     <button class="tab active" data-tab="spreads">Live Spreads</button>
     <button class="tab" data-tab="positions">Positions</button>
     <button class="tab" data-tab="trades">Trades</button>
+    <button class="tab" data-tab="wallet">Wallet <span id="wallet-badge" class="badge badge-red" style="display:none;margin-left:4px;">!</span></button>
     <button class="tab" data-tab="config">Config</button>
     <button class="tab" data-tab="events">Events</button>
   </div>
@@ -325,6 +333,60 @@ a:hover { color: var(--cyan-light); }
     </div>
   </section>
 
+  <!-- Wallet -->
+  <section id="tab-wallet" style="display:none;">
+    <div class="note">
+      卡位 token 自动重试队列 + 钱包手动清账。
+      <span class="text-amber">⚠️ 重试失败超过 20 次会放弃自动处理，需手动卖出。</span>
+    </div>
+
+    <!-- Pending Unwind -->
+    <h3 style="margin:12px 0 8px;font-size:14px;color:var(--amber-light);">
+      待重试队列 (<span id="unwind-count">0</span>)
+    </h3>
+    <div class="table-wrap" style="margin-bottom:20px;">
+      <table>
+        <thead>
+          <tr>
+            <th>Symbol</th>
+            <th>Token</th>
+            <th class="right">Amount</th>
+            <th>Version</th>
+            <th class="right">Attempts</th>
+            <th class="right">Stuck Since</th>
+            <th>Last Error</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="unwind-body">
+          <tr><td colspan="8" class="empty">无卡位交易 ✓</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Wallet Balances -->
+    <h3 style="margin:12px 0 8px;font-size:14px;color:var(--cyan-light);">
+      钱包里的 token 余额（当前 candidates 范围内）
+    </h3>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Symbol</th>
+            <th>Token</th>
+            <th class="right">Balance</th>
+            <th>Version</th>
+            <th class="right">Pool Fee</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="wallet-body">
+          <tr><td colspan="6" class="empty">钱包干净 ✓</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
   <!-- Config -->
   <section id="tab-config" style="display:none;">
     <div class="config-form" id="config-form"></div>
@@ -348,6 +410,7 @@ const state = {
     top_n_gainers: 10, min_24h_gain_pct: 0.05, min_pool_tvl_usd: 100000,
     max_pool_fee_bps: 2500, enabled: true,
     cex_taker_fee: 0.00045, cex_maker_fee: 0.00018,
+    gas_boost_multiplier: 1.5,
   },
   stats: {},
   candidates: [],
@@ -356,6 +419,8 @@ const state = {
   events: [],
   expandedTradeId: null,
   configLoaded: false,
+  pendingUnwind: [],
+  walletBalances: [],
 };
 
 const configFields = [
@@ -375,6 +440,7 @@ const configFields = [
   {key:'max_pool_fee_bps', type:'num', step:500, label:'Max Pool Fee (bps)', hint:'2500=0.25%'},
   {key:'cex_taker_fee', type:'num', step:0.0001, label:'CEX Taker Fee'},
   {key:'cex_maker_fee', type:'num', step:0.0001, label:'CEX Maker Fee'},
+  {key:'gas_boost_multiplier', type:'num', step:0.1, label:'Gas Boost Multiplier', hint:'1.5=链上base×1.5倍；提高抢速度，2-3倍可把DEX确认从~900ms压到~450ms'},
 ];
 
 // ---------- Formatters ----------
@@ -487,6 +553,11 @@ function renderStats() {
   el('s-lat-dc-90').textContent = L.dex_confirm_p90 ?? 0;
   el('s-lat-t-50').textContent = L.total_p50 ?? 0;
   el('s-lat-t-90').textContent = L.total_p90 ?? 0;
+
+  // gas info
+  const gas = s.gas || {};
+  el('s-gas-gwei').textContent = (gas.gwei ?? 0).toFixed(3);
+  el('s-gas-boost').textContent = (gas.boost ?? 1.5).toFixed(1);
 }
 
 function renderCandidates() {
@@ -506,10 +577,19 @@ function renderCandidates() {
                      : (basis > entryPct ? 'text-green'
                      : (basis < -entryPct ? 'text-red' : 'text-dim'));
     const tvlColor = (c.pool_tvl_usd||0) < state.config.min_pool_tvl_usd ? 'text-red' : '';
-    const verBadge = c.pool_version === 'v3' ? 'badge-cyan' : 'badge-purple';
+    const ver = c.pool_version || 'v3';
+    let verBadge, verText;
+    if (ver === 'v3')                 { verBadge = 'badge-cyan';   verText = 'V3'; }
+    else if (ver === 'v2')            { verBadge = 'badge-purple'; verText = 'V2'; }
+    else if (ver.startsWith('infinity')) {
+      verBadge = 'badge-amber';       // Infinity 池暂仅监控，用橙色提示
+      verText = ver === 'infinity-clmm' ? 'INF-CL' : (ver === 'infinity-lbamm' ? 'INF-LB' : 'INF');
+    }
+    else                              { verBadge = 'badge-slate';  verText = ver.toUpperCase(); }
+    const verTitle = ver.startsWith('infinity') ? '仅监控，暂不自动交易' : '';
     return `<tr class="${rowClass}">
       <td style="font-weight:600">${c.symbol||'-'}</td>
-      <td><span class="badge ${verBadge}">${(c.pool_version||'v3').toUpperCase()}</span></td>
+      <td><span class="badge ${verBadge}" title="${verTitle}">${verText}</span></td>
       <td class="right mono text-green">${c.change_24h_pct?((c.change_24h_pct*100).toFixed(2)+'%'):'-'}</td>
       <td class="right mono">${fmt.num(c.cex_mid_live)}</td>
       <td class="right mono">${fmt.num(c.dex_live)}</td>
@@ -681,10 +761,11 @@ document.querySelectorAll('.tab').forEach(t => {
     document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
     t.classList.add('active');
     const tabId = t.dataset.tab;
-    ['spreads','positions','trades','config','events'].forEach(name => {
+    ['spreads','positions','trades','wallet','config','events'].forEach(name => {
       el('tab-'+name).style.display = name === tabId ? '' : 'none';
     });
     if (tabId === 'config') renderConfig();
+    if (tabId === 'wallet') loadWallet();
   });
 });
 
@@ -708,6 +789,97 @@ el('btn-close-all').addEventListener('click', async () => {
   await fetch('/api/close_all', {method:'POST'});
 });
 
+// ---------- Wallet tab ----------
+async function loadWallet() {
+  try {
+    const [pending, balances] = await Promise.all([
+      fetch('/api/pending_unwind').then(r=>r.json()),
+      fetch('/api/wallet/balances').then(r=>r.json()),
+    ]);
+    state.pendingUnwind = pending || [];
+    state.walletBalances = balances || [];
+    renderWallet();
+  } catch(e) {
+    console.error('loadWallet err', e);
+  }
+}
+
+function renderWallet() {
+  const pending = state.pendingUnwind || [];
+  const wallet = state.walletBalances || [];
+
+  // 红徽章
+  const badge = el('wallet-badge');
+  const total = pending.length + wallet.length;
+  if (total > 0) { badge.style.display = ''; badge.textContent = total; }
+  else badge.style.display = 'none';
+
+  // pending unwind table
+  el('unwind-count').textContent = pending.length;
+  const unwTbody = el('unwind-body');
+  if (pending.length === 0) {
+    unwTbody.innerHTML = '<tr><td colspan="8" class="empty">无卡位交易 ✓</td></tr>';
+  } else {
+    unwTbody.innerHTML = pending.map(p => {
+      const stuckMin = Math.floor((Date.now() - p.first_stuck_at) / 60000);
+      const urgentCls = p.attempts >= 10 ? 'text-red' : (p.attempts >= 5 ? 'text-amber' : '');
+      return `<tr>
+        <td style="font-weight:600">${p.symbol}</td>
+        <td class="mono xs text-muted"><a href="https://bscscan.com/token/${p.token_address}" target="_blank">${fmt.addr(p.token_address)}</a></td>
+        <td class="right mono">${(+p.amount).toPrecision(6)}</td>
+        <td><span class="badge ${p.pool_version==='v3'?'badge-cyan':'badge-purple'}">${p.pool_version.toUpperCase()}</span></td>
+        <td class="right mono ${urgentCls}">${p.attempts}/20</td>
+        <td class="right xs text-muted">${stuckMin}min ago</td>
+        <td class="xs text-red" style="max-width:200px;word-break:break-all">${p.last_error || '-'}</td>
+        <td>
+          <button class="btn btn-danger" style="font-size:11px;padding:3px 8px"
+            onclick="manualSell('${p.token_address}', ${p.amount}, ${p.pool_fee}, '${p.pool_version}')">
+            立即卖出
+          </button>
+        </td>
+      </tr>`;
+    }).join('');
+  }
+
+  // wallet balances table
+  const wBody = el('wallet-body');
+  if (wallet.length === 0) {
+    wBody.innerHTML = '<tr><td colspan="6" class="empty">钱包干净 ✓</td></tr>';
+  } else {
+    wBody.innerHTML = wallet.map(w => `<tr>
+      <td style="font-weight:600">${w.symbol}</td>
+      <td class="mono xs text-muted"><a href="https://bscscan.com/token/${w.token_address}" target="_blank">${fmt.addr(w.token_address)}</a></td>
+      <td class="right mono">${(+w.balance).toPrecision(6)}</td>
+      <td><span class="badge ${w.pool_version==='v3'?'badge-cyan':'badge-purple'}">${(w.pool_version||'v3').toUpperCase()}</span></td>
+      <td class="right mono xs">${((w.pool_fee||0)/10000).toFixed(2)}%</td>
+      <td>
+        <button class="btn btn-danger" style="font-size:11px;padding:3px 8px"
+          onclick="manualSell('${w.token_address}', ${w.balance}, ${w.pool_fee}, '${w.pool_version||'v3'}')">
+          卖出
+        </button>
+      </td>
+    </tr>`).join('');
+  }
+}
+
+window.manualSell = async function(tokenAddr, amount, poolFee, poolVersion) {
+  if (!confirm(`确定以 ≥10% 滑点立即卖出 ${(+amount).toPrecision(4)} 个 token？\n\n${tokenAddr}`)) return;
+  const res = await fetch('/api/wallet/sell', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({
+      token_address: tokenAddr, amount: amount,
+      pool_fee: poolFee, pool_version: poolVersion,
+    }),
+  }).then(r=>r.json());
+  if (res && res.ok) {
+    alert('卖出成功！tx: ' + res.tx_hash);
+  } else {
+    alert('卖出失败: ' + JSON.stringify(res));
+  }
+  loadWallet();
+};
+
 // ---------- Data loading ----------
 async function loadAll() {
   try {
@@ -726,6 +898,17 @@ async function loadAll() {
     state.events = ev;
     if (!state.configLoaded) { Object.assign(state.config, cfg); state.configLoaded = true; }
     renderAll();
+    // 每次 loadAll 顺便刷新 wallet badge
+    try {
+      const pending = await fetch('/api/pending_unwind').then(r=>r.json());
+      state.pendingUnwind = pending || [];
+      const badge = el('wallet-badge');
+      if (state.pendingUnwind.length > 0) {
+        badge.style.display = ''; badge.textContent = state.pendingUnwind.length;
+      } else {
+        badge.style.display = 'none';
+      }
+    } catch(e) {}
   } catch(e) {
     console.error('loadAll err', e);
   }

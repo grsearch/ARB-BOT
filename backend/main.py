@@ -83,6 +83,7 @@ async def amain():
         asyncio.create_task(cex_feed.start(), name="cex_feed"),
         asyncio.create_task(dex_feed.start(), name="dex_feed"),
         asyncio.create_task(run_scanner_loop(w3, on_scan_update, bnb_price_ref), name="scanner"),
+        asyncio.create_task(engine.run_unwind_loop(), name="unwind"),
     ]
 
     # 启动后立即订阅BNBUSDT（始终保持，作为WBNB价格参考）

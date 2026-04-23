@@ -42,6 +42,7 @@ class ConfigUpdate(BaseModel):
     enabled: bool | None = None
     cex_taker_fee: float | None = None
     cex_maker_fee: float | None = None
+    gas_boost_multiplier: float | None = None
 
 
 class WSHub:
@@ -79,12 +80,38 @@ def _percentile(vals: list[int], pct: float) -> int:
     return int(vals[i])
 
 
+def _get_gas_info(engine_ref: dict) -> dict:
+    """返回当前 dex_executor 的 gas 信息"""
+    eng = engine_ref.get("engine")
+    if not eng or not eng.dex_exec:
+        return {"wei": 0, "gwei": 0, "boost": 1.0}
+    wei = eng.dex_exec._gas_price or 0
+    boost = getattr(RUNTIME, "gas_boost_multiplier", 1.5)
+    return {
+        "wei": int(wei),
+        "gwei": round(wei / 1e9, 3),
+        "boost": float(boost),
+    }
+
+
 def build_app(engine_ref: dict, hub: WSHub) -> FastAPI:
     app = FastAPI(title="Arb Bot Dashboard")
 
+    # 所有响应都加这个 header，绕过 localtunnel 的 "Friendly Reminder" 拦截页。
+    # 对其他反代（Cloudflare Tunnel / ngrok / 直连）无影响。
+    @app.middleware("http")
+    async def add_bypass_header(request, call_next):
+        response = await call_next(request)
+        response.headers["bypass-tunnel-reminder"] = "true"
+        return response
+
     @app.get("/")
     async def index():
-        return FileResponse(FRONTEND_DIR / "index.html")
+        # FileResponse 会绕过 middleware，直接在这里设置 header
+        return FileResponse(
+            FRONTEND_DIR / "index.html",
+            headers={"bypass-tunnel-reminder": "true"},
+        )
 
     @app.get("/api/config")
     async def get_config():
@@ -92,10 +119,19 @@ def build_app(engine_ref: dict, hub: WSHub) -> FastAPI:
 
     @app.post("/api/config")
     async def update_config(upd: ConfigUpdate):
-        for k, v in upd.dict(exclude_unset=True).items():
+        changes = upd.dict(exclude_unset=True)
+        for k, v in changes.items():
             if hasattr(RUNTIME, k):
                 setattr(RUNTIME, k, v)
-        await DB.log_event("info", f"Config updated: {upd.dict(exclude_unset=True)}")
+        # 持久化到 DB：重启后从 DB 读回，不会回默认值
+        if changes:
+            await DB.save_runtime_overrides(changes)
+        # 如果改了 gas_boost_multiplier，重置 gas 刷新计时器让下次交易立即用新值
+        if "gas_boost_multiplier" in changes:
+            eng = engine_ref.get("engine")
+            if eng and eng.dex_exec:
+                eng.dex_exec._gas_refresh_ts = 0
+        await DB.log_event("info", f"Config updated (persisted): {changes}")
         return RUNTIME.to_dict()
 
     @app.get("/api/stats")
@@ -162,6 +198,7 @@ def build_app(engine_ref: dict, hub: WSHub) -> FastAPI:
                 "dex_confirm_p90": _percentile(dexconf_list, 0.9),
             },
             "daily_pnl": row_daily,
+            "gas": _get_gas_info(engine_ref),
         }
 
     @app.get("/api/trades")
@@ -251,8 +288,106 @@ def build_app(engine_ref: dict, hub: WSHub) -> FastAPI:
     @app.post("/api/toggle_enabled")
     async def toggle_enabled():
         RUNTIME.enabled = not RUNTIME.enabled
+        await DB.save_runtime_override("enabled", RUNTIME.enabled)
         await DB.log_event("info", f"enabled -> {RUNTIME.enabled}")
         return {"enabled": RUNTIME.enabled}
+
+    # ---------- 卡位 token 管理 ----------
+    @app.get("/api/pending_unwind")
+    async def pending_unwind():
+        """返回当前卡位 token 队列"""
+        eng = engine_ref.get("engine")
+        if not eng:
+            return []
+        return [
+            {
+                "symbol": k,
+                "token_address": v["token_address"],
+                "pool_address": v.get("pool_address"),
+                "pool_fee": v["pool_fee"],
+                "pool_version": v["pool_version"],
+                "amount": v["amount"],
+                "attempts": v["attempts"],
+                "first_stuck_at": v["first_stuck_at"],
+                "last_error": v.get("last_error"),
+                "trade_id": v.get("trade_id"),
+            }
+            for k, v in eng.pending_unwind.items()
+        ]
+
+    @app.get("/api/wallet/balances")
+    async def wallet_balances():
+        """扫描 candidates 里所有 token 在我们钱包的余额（仅非零）"""
+        eng = engine_ref.get("engine")
+        if not eng:
+            return []
+        # 从 candidates 表取所有 token，并查钱包余额
+        rows = await DB.fetchall(
+            "SELECT symbol, token_address, pool_address, pool_fee, pool_version, decimals "
+            "FROM candidates", ()
+        )
+        out = []
+        from .abi import ERC20_ABI
+        from web3 import Web3
+        import asyncio as _asyncio
+        dex_exec = eng.dex_exec
+        wallet_addr = None
+        if dex_exec.account:
+            wallet_addr = dex_exec.account.address
+        if not wallet_addr:
+            return []
+        for r in rows:
+            try:
+                token_ct = dex_exec.w3.eth.contract(
+                    address=Web3.to_checksum_address(r["token_address"]), abi=ERC20_ABI
+                )
+                bal = await _asyncio.to_thread(
+                    token_ct.functions.balanceOf(wallet_addr).call
+                )
+                if bal <= 0:
+                    continue
+                dec = r["decimals"] or 18
+                out.append({
+                    "symbol": r["symbol"],
+                    "token_address": r["token_address"],
+                    "pool_address": r["pool_address"],
+                    "pool_fee": r["pool_fee"],
+                    "pool_version": r["pool_version"],
+                    "decimals": dec,
+                    "balance": bal / (10 ** dec),
+                    "balance_wei": str(bal),
+                })
+            except Exception:
+                continue
+        return out
+
+    class WalletSellRequest(BaseModel):
+        token_address: str
+        amount: float
+        pool_fee: int
+        pool_version: str = "v3"
+
+    @app.post("/api/wallet/sell")
+    async def wallet_sell(req: WalletSellRequest):
+        """手动卖出钱包里的某个 token，换成 USDT"""
+        eng = engine_ref.get("engine")
+        if not eng:
+            raise HTTPException(503, "Engine not running")
+        # 用池子当前 DEX 价作为 expected
+        expected_price = 0.01   # fallback 用很低值，靠 max_slippage 大一点保成交
+        for sym, p in eng.prices_dex.items():
+            # 尝试匹配到价格
+            if p and p.get("price"):
+                expected_price = p["price"]
+                break
+        res = await eng.dex_exec.sell_token_for_usdt(
+            req.token_address, req.pool_fee, req.amount,
+            expected_price,
+            max_slippage=0.10,   # 手动清账默认放宽到 10% 滑点
+            pool_version=req.pool_version,
+        )
+        await DB.log_event("info", f"Manual wallet sell {req.token_address[:10]}... → {res}")
+        return res
 
     @app.websocket("/ws")
     async def websocket_endpoint(ws: WebSocket):

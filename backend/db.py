@@ -132,6 +132,13 @@ CREATE TABLE IF NOT EXISTS binance_bsc_coins (
     withdraw_enable INTEGER,
     last_update INTEGER
 );
+
+-- 运行时配置持久化：Dashboard 修改后写入此表，重启时优先从这里读
+CREATE TABLE IF NOT EXISTS runtime_config (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at INTEGER
+);
 """
 
 
@@ -142,6 +149,57 @@ class DB:
     async def init():
         async with aiosqlite.connect(DB_PATH) as db:
             await db.executescript(SCHEMA)
+            await db.commit()
+        # 自动迁移：补缺失的列（处理老数据库升级）
+        await DB._auto_migrate()
+
+    @staticmethod
+    async def _auto_migrate():
+        """检查现有表的列，如缺失就 ALTER TABLE 加。幂等。"""
+        # 所需列：{表名: [(列名, 列定义), ...]}
+        required = {
+            "candidates": [
+                ("pool_version", "TEXT"),
+                ("pool_24h_vol_usd", "REAL"),
+                ("source", "TEXT"),
+            ],
+            "trades": [
+                ("pool_fee", "INTEGER"),
+                ("dex_entry_amount", "REAL"),
+                ("dex_exit_amount", "REAL"),
+                ("cex_entry_qty", "REAL"),
+                ("cex_exit_qty", "REAL"),
+                ("t_signal", "INTEGER"),
+                ("t_cex_sent_open", "INTEGER"),
+                ("t_cex_filled_open", "INTEGER"),
+                ("t_dex_sent_open", "INTEGER"),
+                ("t_dex_confirmed_open", "INTEGER"),
+                ("t_signal_close", "INTEGER"),
+                ("t_cex_sent_close", "INTEGER"),
+                ("t_cex_filled_close", "INTEGER"),
+                ("t_dex_sent_close", "INTEGER"),
+                ("t_dex_confirmed_close", "INTEGER"),
+                ("cex_fill_latency_open", "INTEGER"),
+                ("dex_send_latency_open", "INTEGER"),
+                ("dex_confirm_latency_open", "INTEGER"),
+                ("cex_fee_usdt", "REAL DEFAULT 0"),
+                ("dex_fee_usdt", "REAL DEFAULT 0"),
+                ("gas_fee_usdt", "REAL DEFAULT 0"),
+                ("gross_pnl_usdt", "REAL DEFAULT 0"),
+            ],
+        }
+        async with aiosqlite.connect(DB_PATH) as db:
+            for tbl, cols in required.items():
+                # 取现有列
+                cur = await db.execute(f"PRAGMA table_info({tbl})")
+                rows = await cur.fetchall()
+                have = {r[1] for r in rows}
+                for col, coldef in cols:
+                    if col not in have:
+                        try:
+                            await db.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {coldef}")
+                        except Exception:
+                            pass
             await db.commit()
 
     @staticmethod
@@ -177,6 +235,44 @@ class DB:
             (int(datetime.now(timezone.utc).timestamp() * 1000),
              level, msg, json.dumps(data) if data else None)
         )
+
+    # ---------- 运行时配置持久化 ----------
+    @staticmethod
+    def load_runtime_overrides_sync() -> dict:
+        """同步读取，用于启动时（asyncio 还没启）。返回 {key: parsed_value} 字典。"""
+        import sqlite3
+        overrides: dict = {}
+        try:
+            # 建表（schema中有，但这里容错）
+            DB_PATH.parent.mkdir(exist_ok=True)
+            conn = sqlite3.connect(str(DB_PATH))
+            conn.execute("""CREATE TABLE IF NOT EXISTS runtime_config (
+                key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER)""")
+            conn.commit()
+            cur = conn.execute("SELECT key, value FROM runtime_config")
+            for k, v in cur.fetchall():
+                overrides[k] = json.loads(v)
+            conn.close()
+        except Exception:
+            pass
+        return overrides
+
+    @staticmethod
+    async def save_runtime_override(key: str, value):
+        await DB.execute(
+            "INSERT OR REPLACE INTO runtime_config (key, value, updated_at) VALUES (?,?,?)",
+            (key, json.dumps(value),
+             int(datetime.now(timezone.utc).timestamp() * 1000))
+        )
+
+    @staticmethod
+    async def save_runtime_overrides(kv: dict):
+        ts = int(datetime.now(timezone.utc).timestamp() * 1000)
+        for k, v in kv.items():
+            await DB.execute(
+                "INSERT OR REPLACE INTO runtime_config (key, value, updated_at) VALUES (?,?,?)",
+                (k, json.dumps(v), ts)
+            )
 
     @staticmethod
     async def log_latency(kind: str, ms: int, symbol: str = "", tx: str = ""):

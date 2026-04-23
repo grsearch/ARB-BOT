@@ -264,12 +264,14 @@ class DexFeedManager:
                 "token": c["token_address"],
                 "pool": c["pool_address"],
                 "decimals": c.get("decimals", 18),
+                "pool_version": c.get("pool_version", "v3"),
             }
-            # 预填pool meta
-            try:
-                await self.onchain.prime_pool(c["pool_address"], c["token_address"], c.get("decimals", 18))
-            except Exception as e:
-                await DB.log_event("warn", f"onchain prime failed {sym}: {e}")
+            # 预填pool meta：只对 V3 做 slot0 预热（V2 不用，Infinity ABI 不同暂跳过）
+            if c.get("pool_version") == "v3":
+                try:
+                    await self.onchain.prime_pool(c["pool_address"], c["token_address"], c.get("decimals", 18))
+                except Exception as e:
+                    await DB.log_event("warn", f"onchain prime failed {sym}: {e}")
 
         await self.birdeye.update_subscriptions(targets)
 

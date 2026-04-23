@@ -57,16 +57,22 @@ class RuntimeConfig:
     max_concurrent_positions: int = 2
     max_exec_latency_ms: int = 2000
     dry_run: bool = True
-    # 扫描参数
-    scan_interval_sec: int = 900
-    top_n_gainers: int = 10
-    min_24h_gain_pct: float = 0.05
-    min_pool_tvl_usd: float = 100_000
-    max_pool_fee_bps: int = 2500        # 最大 0.25% 池子 fee，1% 的池子不碰
+    # 扫描参数（基于实战调优）
+    scan_interval_sec: int = 120            # 2分钟一次（原15分钟太慢）
+    top_n_gainers: int = 30                 # Top 30（原10个经常找不到BSC币）
+    min_24h_gain_pct: float = 0.02          # 2%（原5%太严）
+    min_pool_tvl_usd: float = 10_000        # $10k（原$100k过滤掉太多新币；新池子链上TVL可能很低）
+    max_pool_fee_bps: int = 10000           # 允许到 1% fee 池（原2500过滤掉SPK这种1%池）
     enabled: bool = True
     # 手续费
     cex_taker_fee: float = BINANCE_TAKER_FEE
     cex_maker_fee: float = BINANCE_MAKER_FEE
+    # Gas: 对基础 gas_price 的乘数（1.0=不加价，2.0=2倍，3.0=3倍抢速度）
+    # BSC 通常 1 Gwei，2倍=2 Gwei，让验证者优先打包
+    gas_boost_multiplier: float = 1.5
+
+    def to_dict(self):
+        return asdict(self)
 
     def to_dict(self):
         return asdict(self)
@@ -116,7 +122,15 @@ def load_runtime_config() -> RuntimeConfig:
         v = os.getenv(key, str(default)).strip().lower()
         return v in ("1", "true", "yes", "y")
 
-    return RuntimeConfig(
+    # 优先级：DB持久化 > .env > 默认值
+    # DB 里是 Dashboard 改的值（用户最新意愿），重启后保留
+    try:
+        from .db import DB
+        db_overrides = DB.load_runtime_overrides_sync()
+    except Exception:
+        db_overrides = {}
+
+    rc = RuntimeConfig(
         entry_threshold=_f("ENTRY_THRESHOLD", 0.025),
         exit_threshold=_f("EXIT_THRESHOLD", 0.005),
         position_usdt=_f("POSITION_USDT", 500.0),
@@ -125,7 +139,23 @@ def load_runtime_config() -> RuntimeConfig:
         max_concurrent_positions=_i("MAX_CONCURRENT_POSITIONS", 2),
         max_exec_latency_ms=_i("MAX_EXEC_LATENCY_MS", 2000),
         dry_run=_b("DRY_RUN", True),
+        scan_interval_sec=_i("SCAN_INTERVAL_SEC", 120),
+        top_n_gainers=_i("TOP_N_GAINERS", 30),
+        min_24h_gain_pct=_f("MIN_24H_GAIN_PCT", 0.02),
+        min_pool_tvl_usd=_f("MIN_POOL_TVL_USD", 10_000),
+        max_pool_fee_bps=_i("MAX_POOL_FEE_BPS", 10000),
+        enabled=_b("ENABLED", True),
+        cex_taker_fee=_f("CEX_TAKER_FEE", BINANCE_TAKER_FEE),
+        cex_maker_fee=_f("CEX_MAKER_FEE", BINANCE_MAKER_FEE),
+        gas_boost_multiplier=_f("GAS_BOOST_MULTIPLIER", 1.5),
     )
+
+    # DB 覆盖（用户从 Dashboard 改的值，优先级最高）
+    for k, v in db_overrides.items():
+        if hasattr(rc, k):
+            setattr(rc, k, v)
+
+    return rc
 
 
 STATIC = load_static_config()

@@ -81,6 +81,9 @@ class ArbEngine:
         self.candidates: dict[str, dict] = {}
         self.positions: dict[str, Position] = {}
         self._busy: set[str] = set()
+        # 卡位 token 重试队列：DEX 卖出失败的 token 等待重试
+        # key=symbol, value={symbol, token_address, pool_fee, pool_version, amount, ...}
+        self.pending_unwind: dict[str, dict] = {}
 
     # ---------- 外部入口 ----------
     async def on_cex_price(self, symbol: str, bid: float, ask: float, ts: int):
@@ -175,6 +178,16 @@ class ArbEngine:
 
     # ---------- 开仓 ----------
     async def _open_position(self, symbol: str, basis: float, cex_mid: float, dex_px: float, cand: dict):
+        # Infinity 池子当前不支持自动交易（仅监控基差）
+        pool_version = cand.get("pool_version", "v3")
+        if pool_version.startswith("infinity"):
+            await DB.log_event(
+                "info",
+                f"SKIP trade {symbol}: pool is {pool_version} "
+                f"(仅监控，下一版本支持 Universal Router 集成)"
+            )
+            return
+
         self._busy.add(symbol)
         try:
             t_signal = _ms()
@@ -200,7 +213,6 @@ class ArbEngine:
             cex_fee = cex_notional * RUNTIME.cex_taker_fee
 
             # 2) DEX 买入（按 CEX 实际成交的名义价值）
-            pool_version = cand.get("pool_version", "v3")
             t_dex_sent = _ms()
             dex_res = await self.dex_exec.buy_token_with_usdt(
                 cand["token_address"], cand["pool_fee"],
@@ -210,11 +222,20 @@ class ArbEngine:
             t_dex_confirmed = _ms()
 
             if not dex_res.get("ok"):
-                # DEX 失败 -> 紧急平CEX空头
+                # DEX 失败 -> 紧急平CEX空头（含重试）
                 await DB.log_event("error",
                     f"DEX open FAIL {symbol}: {dex_res.get('error')} -> emergency CEX cover")
-                cov = await self.cex_exec.close_short(symbol, cex_qty, cex_mid)
-                if cov.get("ok"):
+
+                cov = None
+                for attempt in range(3):   # 最多重试3次，每次间隔500ms
+                    cov = await self.cex_exec.close_short(symbol, cex_qty, cex_mid)
+                    if cov.get("ok"):
+                        break
+                    await DB.log_event("warn",
+                        f"Emergency close retry {attempt+1}/3 for {symbol}: {cov.get('error')}")
+                    await asyncio.sleep(0.5)
+
+                if cov and cov.get("ok"):
                     cov_notional = cov["avg_price"] * cov["filled"]
                     cov_fee = cov_notional * RUNTIME.cex_taker_fee
                     loss = (cov["avg_price"] - cex_avg) * cex_qty + cex_fee + cov_fee
@@ -223,8 +244,9 @@ class ArbEngine:
                 else:
                     # 严重：CEX已开空但平仓也失败，人工介入
                     await DB.log_event("error",
-                        f"!!! CRITICAL {symbol}: CEX short open but emergency close FAILED. "
-                        f"Manual action required. cex_avg={cex_avg} qty={cex_qty} err={cov.get('error')}")
+                        f"!!! CRITICAL {symbol}: CEX short open but emergency close FAILED after 3 retries. "
+                        f"Manual action required. cex_avg={cex_avg} qty={cex_qty} "
+                        f"err={(cov or {}).get('error')}")
                 return
 
             dex_eff_price = dex_res["effective_price"]
@@ -321,8 +343,12 @@ class ArbEngine:
         finally:
             self._busy.discard(symbol)
 
-    # ---------- 平仓 ----------
+    # ---------- 平仓 (DEX 优先串行) ----------
     async def _close_position(self, symbol: str, exit_basis: float, reason: str = "convergence"):
+        """
+        新策略：先 DEX 卖 token → 成功再 CEX 平空
+        DEX 失败 → CEX 保持开空（对冲还在），token 进入 pending_unwind 重试队列
+        """
         if symbol not in self.positions or symbol in self._busy:
             return
         self._busy.add(symbol)
@@ -337,51 +363,103 @@ class ArbEngine:
             dex_now = self.prices_dex.get(symbol, {}).get("price") or pos.dex_entry_price
             cex_now = self.prices_cex.get(symbol, {}).get("mid") or pos.cex_avg_entry
 
-            # 并行平仓
+            # ===== Step 1: 先做 DEX sell (串行) =====
             t_dex_sent = _ms()
-            t_cex_sent = _ms()
-            dex_task = asyncio.create_task(self.dex_exec.sell_token_for_usdt(
+            dex_res = await self.dex_exec.sell_token_for_usdt(
                 pos.token_address, pos.pool_fee, pos.dex_amount_token,
                 dex_now, RUNTIME.max_slippage,
-                pool_version=pos.pool_version))
-            cex_task = asyncio.create_task(self.cex_exec.close_short(
-                symbol, pos.cex_filled_qty, cex_now))
-
-            dex_res, cex_res = await asyncio.gather(dex_task, cex_task, return_exceptions=True)
-            t_done = _ms()
-
+                pool_version=pos.pool_version
+            )
+            t_dex_done = _ms()
             ok_dex = isinstance(dex_res, dict) and dex_res.get("ok")
+
+            # DEX 失败 → 不平 CEX，token 进重试队列
+            if not ok_dex:
+                err = (dex_res or {}).get("error", "unknown")
+                tx_hash = (dex_res or {}).get("tx_hash", "")
+                await DB.log_event(
+                    "error",
+                    f"CLOSE DEX sell FAIL {symbol}: {err} tx={tx_hash} "
+                    f"→ CEX 保持空单，token 进入 pending_unwind 队列重试"
+                )
+                # 加入重试队列
+                self.pending_unwind[symbol] = {
+                    "symbol": symbol,
+                    "token_address": pos.token_address,
+                    "pool_fee": pos.pool_fee,
+                    "pool_version": pos.pool_version,
+                    "amount": pos.dex_amount_token,
+                    "pool_fee_pct": pos.pool_fee_pct,
+                    "trade_id": pos.trade_id,
+                    "attempts": 0,
+                    "first_stuck_at": _ms(),
+                    "last_error": err,
+                }
+                # 记录 trade 为 stuck_dex 状态
+                await DB.execute(
+                    "UPDATE trades SET status=?, error=? WHERE id=?",
+                    ("stuck_dex", f"DEX sell failed on close: {err}", pos.trade_id)
+                )
+                return
+
+            # ===== Step 2: DEX 成功，继续 CEX 平空 =====
+            t_cex_sent = _ms()
+            cex_res = await self.cex_exec.close_short(
+                symbol, pos.cex_filled_qty, cex_now
+            )
+            t_done = _ms()
             ok_cex = isinstance(cex_res, dict) and cex_res.get("ok")
 
             # 手续费和PnL
+            dex_exit_price = dex_res["effective_price"]
+            dex_exit_amount = dex_res["amount_out"]
+            dex_notional_close = dex_res["amount_out"]
+            dex_fee_close = dex_notional_close * pos.pool_fee_pct
+            gas_used = dex_res.get("gas_used", TYPICAL_SWAP_GAS_UNITS)
+            gas_fee_close = self._calc_gas_cost_usdt(gas_used)
+
             cex_fee_close = 0.0
-            dex_fee_close = 0.0
-            gas_fee_close = 0.0
-            gross_pnl = 0.0
-            dex_exit_price = None
-            dex_exit_amount = None
             cex_exit_price = None
-
-            if ok_dex:
-                dex_exit_price = dex_res["effective_price"]
-                dex_exit_amount = dex_res["amount_out"]
-                # DEX pool 手续费：卖出名义价值 * fee_pct
-                dex_notional_close = dex_res["amount_out"]
-                dex_fee_close = dex_notional_close * pos.pool_fee_pct
-                gas_used = dex_res.get("gas_used", TYPICAL_SWAP_GAS_UNITS)
-                gas_fee_close = self._calc_gas_cost_usdt(gas_used)
-
+            gross_pnl = 0.0
             if ok_cex:
                 cex_exit_price = cex_res["avg_price"]
                 cex_exit_notional = cex_res["avg_price"] * cex_res["filled"]
                 cex_fee_close = cex_exit_notional * RUNTIME.cex_taker_fee
-
-            if ok_cex and ok_dex:
-                # DEX leg: 正向 PnL = (卖出价 - 买入价) * 数量
                 dex_leg = (dex_res["effective_price"] - pos.dex_entry_price) * pos.dex_amount_token
-                # CEX leg: 空单 PnL = (开仓价 - 平仓价) * 数量
                 cex_leg = (pos.cex_avg_entry - cex_res["avg_price"]) * pos.cex_filled_qty
                 gross_pnl = dex_leg + cex_leg
+            else:
+                # DEX 成功但 CEX 失败 → 严重情况：token 已卖出，但空单还在
+                # 此时反而要平空，否则敞口倒置
+                err = (cex_res or {}).get("error", "unknown")
+                await DB.log_event(
+                    "error",
+                    f"CLOSE CEX cover FAIL {symbol} AFTER DEX OK: {err} "
+                    f"→ 重试 CEX 平空（DEX 已成交，敞口必须关）"
+                )
+                for attempt in range(5):
+                    await asyncio.sleep(0.4)
+                    cex_res = await self.cex_exec.close_short(symbol, pos.cex_filled_qty, cex_now)
+                    if isinstance(cex_res, dict) and cex_res.get("ok"):
+                        ok_cex = True
+                        cex_exit_price = cex_res["avg_price"]
+                        cex_exit_notional = cex_res["avg_price"] * cex_res["filled"]
+                        cex_fee_close = cex_exit_notional * RUNTIME.cex_taker_fee
+                        dex_leg = (dex_res["effective_price"] - pos.dex_entry_price) * pos.dex_amount_token
+                        cex_leg = (pos.cex_avg_entry - cex_res["avg_price"]) * pos.cex_filled_qty
+                        gross_pnl = dex_leg + cex_leg
+                        t_done = _ms()
+                        await DB.log_event("warn", f"CEX cover succeeded on retry {attempt+1}")
+                        break
+                    await DB.log_event("warn",
+                        f"CEX cover retry {attempt+1}/5 for {symbol}: {(cex_res or {}).get('error')}")
+
+                if not ok_cex:
+                    await DB.log_event(
+                        "error",
+                        f"!!! CRITICAL {symbol}: DEX sold but CEX cover FAILED after 5 retries. "
+                        f"Manual action required — close short on Binance manually."
+                    )
 
             # 总手续费
             total_fees = (
@@ -392,12 +470,10 @@ class ArbEngine:
 
             total_latency_close = t_done - t_signal_close
             status = "closed" if (ok_cex and ok_dex) else "error"
-            # res 可能是 Exception（return_exceptions=True）
             err_str = None
             if status != "closed":
-                err_str = f"dex={repr(dex_res) if not ok_dex else 'ok'}; cex={repr(cex_res) if not ok_cex else 'ok'}"
+                err_str = f"cex={repr(cex_res) if not ok_cex else 'ok'}"
 
-            # 安全取值
             def _safe_get(r, k, default=None):
                 if isinstance(r, dict):
                     return r.get(k, default)
@@ -426,7 +502,7 @@ class ArbEngine:
                  t_signal_close, t_cex_sent,
                  t_done if ok_cex else None,
                  t_dex_sent,
-                 t_done if ok_dex else None,
+                 t_dex_done,
                  total_latency_close,
                  cex_fee_close, dex_fee_close, gas_fee_close,
                  gross_pnl, net_pnl, status, err_str, pos.trade_id)
@@ -437,7 +513,8 @@ class ArbEngine:
             await DB.log_event(
                 "info",
                 f"POSITION CLOSE {symbol} reason={reason} "
-                f"gross_pnl={gross_pnl:.4f} fees={total_fees:.4f} net={net_pnl if net_pnl is not None else 'N/A'} "
+                f"gross_pnl={gross_pnl:.4f} fees={total_fees:.4f} "
+                f"net={net_pnl if net_pnl is not None else 'N/A'} "
                 f"latency={total_latency_close}ms"
             )
 
@@ -459,3 +536,90 @@ class ArbEngine:
     async def force_close_all(self, reason="manual"):
         for s in list(self.positions.keys()):
             await self._close_position(s, 0, reason=reason)
+
+    # ---------- 卡位 token 自动重试 unwind ----------
+    async def run_unwind_loop(self):
+        """后台任务：每 30 秒扫 pending_unwind 队列，重试 DEX 卖出 → 成功后补 CEX 平空"""
+        while True:
+            try:
+                await asyncio.sleep(30)
+                if not self.pending_unwind:
+                    continue
+                for symbol in list(self.pending_unwind.keys()):
+                    try:
+                        await self._retry_unwind_one(symbol)
+                    except Exception as e:
+                        await DB.log_event("error", f"unwind retry err {symbol}: {e}")
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                await DB.log_event("error", f"unwind loop err: {e}")
+
+    async def _retry_unwind_one(self, symbol: str):
+        item = self.pending_unwind.get(symbol)
+        if not item:
+            return
+        item["attempts"] += 1
+        if item["attempts"] > 20:
+            await DB.log_event(
+                "error",
+                f"!!! UNWIND GIVE UP {symbol} after 20 attempts. "
+                f"Token stuck in wallet. Use Wallet tab to manually sell."
+            )
+            # 留在队列里，但别再自动重试（标志大于20就跳过）
+            return
+
+        dex_px = self.prices_dex.get(symbol, {}).get("price") or 0
+        if not dex_px:
+            # 如果没价格，跳过这次重试
+            return
+
+        await DB.log_event(
+            "info",
+            f"UNWIND retry {item['attempts']}/20 {symbol} amount={item['amount']:.6g}"
+        )
+
+        dex_res = await self.dex_exec.sell_token_for_usdt(
+            item["token_address"], item["pool_fee"], item["amount"],
+            dex_px, max(RUNTIME.max_slippage, 0.03),    # 重试时放宽滑点到至少3%
+            pool_version=item["pool_version"]
+        )
+
+        if not (isinstance(dex_res, dict) and dex_res.get("ok")):
+            item["last_error"] = (dex_res or {}).get("error", "unknown")
+            await DB.log_event(
+                "warn",
+                f"UNWIND DEX sell still fail {symbol}: {item['last_error']}"
+            )
+            return
+
+        # DEX 成功 → 补 CEX 平空（如果 pos 还在）
+        pos = self.positions.get(symbol)
+        if pos:
+            cex_now = self.prices_cex.get(symbol, {}).get("mid") or pos.cex_avg_entry
+            cex_res = None
+            for attempt in range(5):
+                cex_res = await self.cex_exec.close_short(
+                    symbol, pos.cex_filled_qty, cex_now
+                )
+                if isinstance(cex_res, dict) and cex_res.get("ok"):
+                    break
+                await asyncio.sleep(0.4)
+            if not (isinstance(cex_res, dict) and cex_res.get("ok")):
+                await DB.log_event(
+                    "error",
+                    f"!!! {symbol} UNWIND: DEX sold ok, but CEX cover FAILED 5x. Manual action required."
+                )
+            else:
+                await DB.log_event(
+                    "info",
+                    f"UNWIND OK {symbol}: DEX sold + CEX covered. Trade id={item['trade_id']}"
+                )
+            del self.positions[symbol]
+
+        # 标记 trade 为 closed
+        await DB.execute(
+            "UPDATE trades SET status='closed', error=? WHERE id=?",
+            (f"unwound after {item['attempts']} attempts", item["trade_id"])
+        )
+        del self.pending_unwind[symbol]
