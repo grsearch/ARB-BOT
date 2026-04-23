@@ -23,13 +23,39 @@ class CEXExecutor:
         self._symbol_meta: dict[str, dict] = {}
 
     async def init(self):
+        # AWS Tokyo 到币安走东京/香港节点，某些环境下 SSL 证书验证会失败
+        # 禁用 ccxt 的 SSL 验证（类似 requests 的 verify=False）
+        import aiohttp
+        import ssl
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+
         self.ex = ccxt_async.binance({
             "apiKey": STATIC.binance_api_key,
             "secret": STATIC.binance_api_secret,
-            "options": {"defaultType": "future", "warnOnFetchOpenOrdersWithoutSymbol": False},
+            "options": {
+                "defaultType": "future",
+                "warnOnFetchOpenOrdersWithoutSymbol": False,
+                "fetchCurrencies": False,   # 跳过 sapi /capital/config/getall，避免 SSL/权限问题
+            },
             "enableRateLimit": True,
+            "aiohttp_trust_env": True,
+            "verify": False,   # 禁用 SSL 验证
         })
-        await self.ex.load_markets()
+        # 直接替换 ccxt 的 session，禁用 SSL verify
+        try:
+            connector = aiohttp.TCPConnector(ssl=ssl_ctx)
+            self.ex.session = aiohttp.ClientSession(connector=connector)
+        except Exception as e:
+            await DB.log_event("warn", f"Failed to set aiohttp session with SSL off: {e}")
+
+        try:
+            await self.ex.load_markets()
+        except Exception as e:
+            await DB.log_event("error", f"ccxt load_markets failed: {e}")
+            # 不抛出，让 bot 启动，失败的 trade 会在实际下单时报错
+            return
 
     def _ccxt_symbol(self, binance_symbol: str) -> str:
         """'RAVEUSDT' -> 'RAVE/USDT:USDT' (ccxt 线性永续格式)"""

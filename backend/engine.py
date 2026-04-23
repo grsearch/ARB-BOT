@@ -22,6 +22,7 @@ import asyncio
 import time
 from dataclasses import dataclass
 from typing import Optional
+from web3 import Web3
 from .config import RUNTIME, TYPICAL_SWAP_GAS_UNITS
 from .db import DB
 
@@ -178,6 +179,13 @@ class ArbEngine:
 
     # ---------- 开仓 ----------
     async def _open_position(self, symbol: str, basis: float, cex_mid: float, dex_px: float, cand: dict):
+        # 黑名单双重拦截（scanner已过滤，这里兜底）
+        bl_raw = getattr(RUNTIME, "symbol_blacklist", "") or ""
+        blacklist = {s.strip().upper() for s in bl_raw.split(",") if s.strip()}
+        if symbol.upper() in blacklist:
+            await DB.log_event("info", f"SKIP {symbol}: blacklisted")
+            return
+
         # Infinity 池子当前不支持自动交易（仅监控基差）
         pool_version = cand.get("pool_version", "v3")
         if pool_version.startswith("infinity"):
@@ -539,13 +547,22 @@ class ArbEngine:
 
     # ---------- 卡位 token 自动重试 unwind ----------
     async def run_unwind_loop(self):
-        """后台任务：每 30 秒扫 pending_unwind 队列，重试 DEX 卖出 → 成功后补 CEX 平空"""
+        """后台任务：扫 pending_unwind 队列，指数退避重试 DEX 卖出。
+
+        退避节奏：第1次立即，第2次+60s，第3次+120s，第4次+240s，最多10次（~17分钟后放弃）
+        """
         while True:
             try:
                 await asyncio.sleep(30)
                 if not self.pending_unwind:
                     continue
+                now = _ms()
                 for symbol in list(self.pending_unwind.keys()):
+                    item = self.pending_unwind[symbol]
+                    # 检查是否到退避时间
+                    next_at = item.get("next_retry_at", 0)
+                    if now < next_at:
+                        continue
                     try:
                         await self._retry_unwind_one(symbol)
                     except Exception as e:
@@ -560,27 +577,65 @@ class ArbEngine:
         if not item:
             return
         item["attempts"] += 1
-        if item["attempts"] > 20:
+
+        # 指数退避：2^n 分钟，封顶20分钟
+        backoff_sec = min(60 * (2 ** (item["attempts"] - 1)), 1200)
+        item["next_retry_at"] = _ms() + backoff_sec * 1000
+
+        MAX_ATTEMPTS = 10
+        if item["attempts"] > MAX_ATTEMPTS:
             await DB.log_event(
                 "error",
-                f"!!! UNWIND GIVE UP {symbol} after 20 attempts. "
-                f"Token stuck in wallet. Use Wallet tab to manually sell."
+                f"!!! UNWIND GIVE UP {symbol} after {MAX_ATTEMPTS} attempts. "
+                f"Token stuck. Use Wallet tab to manually sell."
             )
-            # 留在队列里，但别再自动重试（标志大于20就跳过）
             return
 
         dex_px = self.prices_dex.get(symbol, {}).get("price") or 0
         if not dex_px:
-            # 如果没价格，跳过这次重试
+            return
+
+        # 关键：用链上实际余额，不用记录值（避免余额不足导致 revert）
+        try:
+            from .abi import ERC20_ABI
+            token_ct = self.dex_exec.w3.eth.contract(
+                address=Web3.to_checksum_address(item["token_address"]),
+                abi=ERC20_ABI,
+            )
+            wallet_addr = self.dex_exec.account.address
+            actual_wei = await asyncio.to_thread(
+                token_ct.functions.balanceOf(wallet_addr).call
+            )
+            # token 小数
+            dec_fn = token_ct.functions.decimals()
+            dec = await asyncio.to_thread(dec_fn.call)
+            actual_amount = actual_wei / (10 ** dec)
+        except Exception as e:
+            await DB.log_event("warn", f"UNWIND balance check fail {symbol}: {e}")
+            actual_amount = item["amount"]   # fallback
+
+        # 两者取小（防止超过实际余额）
+        sell_amount = min(actual_amount, item["amount"])
+        if sell_amount <= 0:
+            await DB.log_event(
+                "info",
+                f"UNWIND {symbol}: wallet balance is 0, nothing to sell. Closing entry."
+            )
+            del self.pending_unwind[symbol]
+            await DB.execute(
+                "UPDATE trades SET status='closed', error='wallet balance 0 at unwind' WHERE id=?",
+                (item["trade_id"],)
+            )
             return
 
         await DB.log_event(
             "info",
-            f"UNWIND retry {item['attempts']}/20 {symbol} amount={item['amount']:.6g}"
+            f"UNWIND retry {item['attempts']}/{MAX_ATTEMPTS} {symbol} "
+            f"amount={sell_amount:.6g} (wallet={actual_amount:.6g})"
         )
 
         dex_res = await self.dex_exec.sell_token_for_usdt(
-            item["token_address"], item["pool_fee"], item["amount"],
+            item["token_address"], item["pool_fee"], sell_amount,
             dex_px, max(RUNTIME.max_slippage, 0.03),    # 重试时放宽滑点到至少3%
             pool_version=item["pool_version"]
         )
@@ -589,7 +644,8 @@ class ArbEngine:
             item["last_error"] = (dex_res or {}).get("error", "unknown")
             await DB.log_event(
                 "warn",
-                f"UNWIND DEX sell still fail {symbol}: {item['last_error']}"
+                f"UNWIND DEX sell still fail {symbol}: {item['last_error']} "
+                f"(next retry in {backoff_sec}s)"
             )
             return
 

@@ -43,6 +43,8 @@ class ConfigUpdate(BaseModel):
     cex_taker_fee: float | None = None
     cex_maker_fee: float | None = None
     gas_boost_multiplier: float | None = None
+    symbol_blacklist: str | None = None
+    min_bnb_balance: float | None = None
 
 
 class WSHub:
@@ -81,16 +83,26 @@ def _percentile(vals: list[int], pct: float) -> int:
 
 
 def _get_gas_info(engine_ref: dict) -> dict:
-    """返回当前 dex_executor 的 gas 信息"""
+    """返回当前 dex_executor 的 gas 信息 + BNB 余额"""
     eng = engine_ref.get("engine")
     if not eng or not eng.dex_exec:
-        return {"wei": 0, "gwei": 0, "boost": 1.0}
+        return {"wei": 0, "gwei": 0, "boost": 1.0, "bnb_balance": 0}
     wei = eng.dex_exec._gas_price or 0
     boost = getattr(RUNTIME, "gas_boost_multiplier", 1.5)
+    # BNB 余额（同步读，很快）
+    bnb = 0
+    try:
+        if eng.dex_exec.account:
+            raw = eng.dex_exec.w3.eth.get_balance(eng.dex_exec.account.address)
+            bnb = raw / 1e18
+    except Exception:
+        pass
     return {
         "wei": int(wei),
         "gwei": round(wei / 1e9, 3),
         "boost": float(boost),
+        "bnb_balance": round(bnb, 6),
+        "min_bnb_balance": float(getattr(RUNTIME, "min_bnb_balance", 0.002)),
     }
 
 

@@ -586,11 +586,24 @@ class Scanner:
         skipped: list[str] = []
         seen_symbols: set[str] = set()    # 去重：一个币安symbol只留一个(TVL最大的)池子
 
+        # 解析黑名单
+        blacklist = set()
+        bl_raw = getattr(rt, "symbol_blacklist", "") or ""
+        for s in bl_raw.split(","):
+            s = s.strip().upper()
+            if s:
+                blacklist.add(s)
+        if blacklist:
+            await DB.log_event("info", f"Blacklisted symbols: {sorted(blacklist)}")
+
         for p in top_pools:
             base_symbol = (p.get("base_symbol") or "").upper()
             if not base_symbol or base_symbol in seen_symbols:
                 continue
             cex_symbol = f"{base_symbol}USDT"
+            if cex_symbol in blacklist:
+                skipped.append(f"{base_symbol}(blacklisted)")
+                continue
             if cex_symbol not in cex_symbols:
                 skipped.append(f"{base_symbol}(no_cex_perp)")
                 continue

@@ -185,6 +185,7 @@ a:hover { color: var(--cyan-light); }
       <span id="ws-label" class="xs text-dim">CONNECTING</span>
       <span id="badge-dry" class="badge badge-amber">DRY_RUN</span>
       <span id="badge-enabled" class="badge badge-green">ENABLED</span>
+      <span id="badge-bnb" class="badge badge-slate" style="display:none" title="BNB 余额（DEX gas 费）">BNB: -</span>
     </div>
     <div style="display:flex; gap:8px;">
       <button id="btn-pause" class="btn btn-secondary">⏸ Pause</button>
@@ -411,6 +412,8 @@ const state = {
     max_pool_fee_bps: 2500, enabled: true,
     cex_taker_fee: 0.00045, cex_maker_fee: 0.00018,
     gas_boost_multiplier: 1.5,
+    symbol_blacklist: "",
+    min_bnb_balance: 0.002,
   },
   stats: {},
   candidates: [],
@@ -441,6 +444,8 @@ const configFields = [
   {key:'cex_taker_fee', type:'num', step:0.0001, label:'CEX Taker Fee'},
   {key:'cex_maker_fee', type:'num', step:0.0001, label:'CEX Maker Fee'},
   {key:'gas_boost_multiplier', type:'num', step:0.1, label:'Gas Boost Multiplier', hint:'1.5=链上base×1.5倍；提高抢速度，2-3倍可把DEX确认从~900ms压到~450ms'},
+  {key:'symbol_blacklist', type:'text', label:'Symbol Blacklist', hint:'逗号分隔，如 ONUSDT,FAKEUSDT（貔貅盘/卖出受限币）'},
+  {key:'min_bnb_balance', type:'num', step:0.001, label:'Min BNB Balance', hint:'低于此值停止发 DEX TX，防止 gas 耗尽后继续烧'},
 ];
 
 // ---------- Formatters ----------
@@ -515,6 +520,28 @@ function renderHeader() {
   el('badge-enabled').className = 'badge ' + (state.config.enabled ? 'badge-green' : 'badge-slate');
   el('btn-pause').textContent = state.config.enabled ? '⏸ Pause' : '▶ Resume';
   el('entry-threshold-display').textContent = (state.config.entry_threshold*100).toFixed(2)+'%';
+
+  // BNB 余额徽章
+  const gas = (state.stats && state.stats.gas) || {};
+  const bnb = gas.bnb_balance;
+  const minBnb = gas.min_bnb_balance || 0.002;
+  const badge = el('badge-bnb');
+  if (bnb != null) {
+    badge.style.display = '';
+    badge.textContent = `BNB: ${bnb.toFixed(4)}`;
+    if (bnb < minBnb) {
+      badge.className = 'badge badge-red';
+      badge.title = `BNB 余额过低！低于 ${minBnb}，DEX 交易会被阻止。请充值。`;
+    } else if (bnb < minBnb * 3) {
+      badge.className = 'badge badge-amber';
+      badge.title = `BNB 即将耗尽，建议充值`;
+    } else {
+      badge.className = 'badge badge-green';
+      badge.title = `BNB 余额充足`;
+    }
+  } else {
+    badge.style.display = 'none';
+  }
 }
 
 function renderStats() {
@@ -709,6 +736,8 @@ function renderConfig() {
         <input type="checkbox" data-key="${f.key}" ${v?'checked':''}>
         <span class="xs text-dim" id="bool-label-${f.key}">${v?'ON':'OFF'}</span>
       </label>`;
+    } else if (f.type === 'text') {
+      input = `<input type="text" data-key="${f.key}" value="${v||''}" style="width:240px">`;
     } else {
       input = `<input type="number" step="${f.step||'any'}" data-key="${f.key}" value="${v}">`;
     }
@@ -722,7 +751,10 @@ function renderConfig() {
     inp.addEventListener('change', async () => {
       const k = inp.dataset.key;
       const field = configFields.find(x=>x.key===k);
-      const v = field.type === 'bool' ? inp.checked : +inp.value;
+      let v;
+      if (field.type === 'bool') v = inp.checked;
+      else if (field.type === 'text') v = inp.value;
+      else v = +inp.value;
       state.config[k] = v;
       if (field.type === 'bool') {
         const lbl = el(`bool-label-${k}`);

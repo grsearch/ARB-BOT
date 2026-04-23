@@ -16,7 +16,7 @@ from typing import Optional
 from web3 import Web3, HTTPProvider
 from eth_account import Account
 from eth_account.signers.local import LocalAccount
-from .config import STATIC, RUNTIME, PANCAKE_V3_SWAP_ROUTER, PANCAKE_V2_ROUTER, USDT
+from .config import STATIC, RUNTIME, PANCAKE_V3_SWAP_ROUTER, PANCAKE_V2_ROUTER, USDT, WBNB
 from .abi import V3_SWAP_ROUTER_ABI, ERC20_ABI, V3_QUOTER_ABI, V2_ROUTER_ABI
 from .abi import PANCAKE_V3_QUOTER
 from .db import DB
@@ -70,6 +70,8 @@ class DEXExecutor:
         # nonce 缓存
         self._nonce: Optional[int] = None
         self._nonce_lock = asyncio.Lock()
+        # 全局 swap 串行锁（防止多 symbol 并发开仓/unwind 时 nonce 竞争）
+        self._swap_lock = asyncio.Lock()
 
         # gas 缓存 (BSC使用 type 0 legacy gas)
         self._gas_price: int = self.w3.to_wei("1", "gwei")
@@ -90,10 +92,10 @@ class DEXExecutor:
             await DB.log_event("warn", "No wallet loaded (DRY_RUN only)")
             return
 
-        # 预填 nonce
+        # 预填 nonce（用 pending 包含 mempool 未确认 TX，避免 nonce 冲突）
         async with self._nonce_lock:
             self._nonce = await asyncio.to_thread(
-                self.w3.eth.get_transaction_count, self.account.address
+                self.w3.eth.get_transaction_count, self.account.address, "pending"
             )
         await self._refresh_gas_price(force=True)
         await DB.log_event("info", f"DEX ready: addr={self.account.address} nonce={self._nonce} gas={self._gas_price}")
@@ -124,10 +126,10 @@ class DEXExecutor:
             return n
 
     async def _reset_nonce_from_chain(self):
-        """当交易失败时重新对齐nonce"""
+        """当交易失败时重新对齐nonce（用 pending 包括 mempool 中未确认 TX）"""
         async with self._nonce_lock:
             self._nonce = await asyncio.to_thread(
-                self.w3.eth.get_transaction_count, self.account.address
+                self.w3.eth.get_transaction_count, self.account.address, "pending"
             )
 
     # ---------- approve ----------
@@ -249,6 +251,7 @@ class DEXExecutor:
         """
         花费 usdt_amount USDT 买入 token。
         pool_version: 'v3' (默认) 或 'v2'
+        全局 swap_lock 保证多 symbol/多方向并发时 nonce 不竞争
         """
         if RUNTIME.dry_run:
             await asyncio.sleep(0.3)
@@ -263,16 +266,17 @@ class DEXExecutor:
                 "gas_used": 180_000,
             }
 
-        if pool_version == "v2":
-            return await self._v2_swap_exact_in(
-                USDT, token_addr, usdt_amount, expected_token_price_usd, max_slippage,
-                direction="buy"
-            )
-        else:
-            return await self._v3_swap_exact_in(
-                USDT, token_addr, pool_fee, usdt_amount, expected_token_price_usd, max_slippage,
-                direction="buy"
-            )
+        async with self._swap_lock:
+            if pool_version == "v2":
+                return await self._v2_swap_exact_in(
+                    USDT, token_addr, usdt_amount, expected_token_price_usd, max_slippage,
+                    direction="buy"
+                )
+            else:
+                return await self._v3_swap_exact_in(
+                    USDT, token_addr, pool_fee, usdt_amount, expected_token_price_usd, max_slippage,
+                    direction="buy"
+                )
 
     # ---------- 卖出现货（平仓） ----------
     async def sell_token_for_usdt(
@@ -297,16 +301,17 @@ class DEXExecutor:
                 "gas_used": 180_000,
             }
 
-        if pool_version == "v2":
-            return await self._v2_swap_exact_in(
-                token_addr, USDT, token_amount, expected_token_price_usd, max_slippage,
-                direction="sell"
-            )
-        else:
-            return await self._v3_swap_exact_in(
-                token_addr, USDT, pool_fee, token_amount, expected_token_price_usd, max_slippage,
-                direction="sell"
-            )
+        async with self._swap_lock:
+            if pool_version == "v2":
+                return await self._v2_swap_exact_in(
+                    token_addr, USDT, token_amount, expected_token_price_usd, max_slippage,
+                    direction="sell"
+                )
+            else:
+                return await self._v3_swap_exact_in(
+                    token_addr, USDT, pool_fee, token_amount, expected_token_price_usd, max_slippage,
+                    direction="sell"
+                )
 
     # ---------- V3 swap ----------
     async def _v3_swap_exact_in(
@@ -395,6 +400,36 @@ class DEXExecutor:
         self, tx: dict, token_out: str, out_dec: int, min_out: int,
         amount_in_human: float, expected_price_usd: float, direction: str,
     ) -> dict:
+        # --- 预检 1: BNB 余额保护（防止 gas 耗尽） ---
+        try:
+            bnb_bal = await asyncio.to_thread(
+                self.w3.eth.get_balance, self.account.address
+            )
+            min_bnb = float(getattr(RUNTIME, "min_bnb_balance", 0.002))
+            if bnb_bal < int(min_bnb * 1e18):
+                await DB.log_event(
+                    "error",
+                    f"BNB balance {bnb_bal/1e18:.6f} < min {min_bnb}, aborting tx to save gas"
+                )
+                return {"ok": False, "error": f"insufficient_bnb ({bnb_bal/1e18:.6f})"}
+        except Exception as e:
+            await DB.log_event("warn", f"BNB balance check fail: {e}")
+
+        # --- 预检 2: eth_call 模拟，如果 revert 就不发送（省 gas） ---
+        try:
+            simulate_tx = {k: v for k, v in tx.items() if k != "nonce"}
+            await asyncio.to_thread(self.w3.eth.call, simulate_tx)
+        except Exception as sim_err:
+            err_str = str(sim_err)
+            # 提取常见 revert 原因
+            short = err_str[:200]
+            await DB.log_event(
+                "warn",
+                f"Simulate revert (NOT sending, saving gas): {short}"
+            )
+            return {"ok": False, "error": f"simulate_revert: {short}"}
+
+        # --- 签名并发送 ---
         signed = self.account.sign_transaction(tx)
 
         t0 = time.time()

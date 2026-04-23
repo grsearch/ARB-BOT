@@ -70,6 +70,11 @@ class RuntimeConfig:
     # Gas: 对基础 gas_price 的乘数（1.0=不加价，2.0=2倍，3.0=3倍抢速度）
     # BSC 通常 1 Gwei，2倍=2 Gwei，让验证者优先打包
     gas_boost_multiplier: float = 1.5
+    # 黑名单：逗号分隔的 symbol 列表，扫描+开仓双重拦截
+    # 例如貔貅盘 ONUSDT、卖出限制的币
+    symbol_blacklist: str = ""
+    # BNB 最低余额保护 (低于此值停止发送 DEX TX，避免gas耗尽)
+    min_bnb_balance: float = 0.002
 
     def to_dict(self):
         return asdict(self)
@@ -148,6 +153,8 @@ def load_runtime_config() -> RuntimeConfig:
         cex_taker_fee=_f("CEX_TAKER_FEE", BINANCE_TAKER_FEE),
         cex_maker_fee=_f("CEX_MAKER_FEE", BINANCE_MAKER_FEE),
         gas_boost_multiplier=_f("GAS_BOOST_MULTIPLIER", 1.5),
+        symbol_blacklist=os.getenv("SYMBOL_BLACKLIST", "").strip(),
+        min_bnb_balance=_f("MIN_BNB_BALANCE", 0.002),
     )
 
     # DB 覆盖（用户从 Dashboard 改的值，优先级最高）
