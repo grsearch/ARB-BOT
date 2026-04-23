@@ -414,6 +414,7 @@ const state = {
     gas_boost_multiplier: 1.5,
     symbol_blacklist: "",
     min_bnb_balance: 0.002,
+    broadcast_throttle_ms: 500,
   },
   stats: {},
   candidates: [],
@@ -446,6 +447,7 @@ const configFields = [
   {key:'gas_boost_multiplier', type:'num', step:0.1, label:'Gas Boost Multiplier', hint:'1.5=链上base×1.5倍；提高抢速度，2-3倍可把DEX确认从~900ms压到~450ms'},
   {key:'symbol_blacklist', type:'text', label:'Symbol Blacklist', hint:'逗号分隔，如 ONUSDT,FAKEUSDT（貔貅盘/卖出受限币）'},
   {key:'min_bnb_balance', type:'num', step:0.001, label:'Min BNB Balance', hint:'低于此值停止发 DEX TX，防止 gas 耗尽后继续烧'},
+  {key:'broadcast_throttle_ms', type:'num', step:100, label:'WS Broadcast Throttle (ms)', hint:'500=每秒最多2次价格推送。过小会引起 CPU 飙升'},
 ];
 
 // ---------- Formatters ----------
@@ -473,11 +475,24 @@ const el = (id) => document.getElementById(id);
 const html = (s) => { const d=document.createElement('div'); d.innerHTML=s; return d.firstElementChild; };
 
 // ---------- WebSocket ----------
+// 重连退避：localtunnel 抖动时，固定 2s 重连会形成风暴，把服务端和自己都累死
+// 改指数退避：2s → 3s → 4.5s → ... 最大 30s。成功连上后重置。
+let _wsBackoff = 2000;
+const _WS_MAX_BACKOFF = 30000;
+
 function connectWs() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const ws = new WebSocket(`${proto}//${location.host}/ws`);
-  ws.onopen = () => { state.wsOk = true; updateWsStatus(); };
-  ws.onclose = () => { state.wsOk = false; state.wsGotMsg=false; updateWsStatus(); setTimeout(connectWs, 2000); };
+  ws.onopen = () => {
+    state.wsOk = true; updateWsStatus();
+    _wsBackoff = 2000;   // 连上就重置退避
+  };
+  ws.onclose = () => {
+    state.wsOk = false; state.wsGotMsg = false; updateWsStatus();
+    const delay = _wsBackoff;
+    _wsBackoff = Math.min(_wsBackoff * 1.5, _WS_MAX_BACKOFF);
+    setTimeout(connectWs, delay);
+  };
   ws.onerror = () => { state.wsOk = false; updateWsStatus(); };
   ws.onmessage = (ev) => {
     state.wsGotMsg = true;
@@ -501,6 +516,8 @@ function updateWsStatus() {
   }
 }
 
+// 合并重绘节流：多次 price 更新只在下一个 animation frame 重绘一次
+let _renderScheduled = false;
 function applyPriceUpdate(msg) {
   const row = state.candidates.find(c => c.symbol === msg.symbol);
   if (!row) return;
@@ -508,8 +525,14 @@ function applyPriceUpdate(msg) {
   row.dex_live = msg.dex;
   row.dex_source = msg.dex_source;
   row.basis_live_pct = msg.basis_pct;
-  // Partial re-render - just this row's cells
-  renderCandidates();
+  // 下一帧重绘一次（合并连续推送，防前端 CPU 飙升）
+  if (!_renderScheduled) {
+    _renderScheduled = true;
+    requestAnimationFrame(() => {
+      _renderScheduled = false;
+      renderCandidates();
+    });
+  }
 }
 
 // ---------- Render ----------

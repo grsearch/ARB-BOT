@@ -45,6 +45,7 @@ class ConfigUpdate(BaseModel):
     gas_boost_multiplier: float | None = None
     symbol_blacklist: str | None = None
     min_bnb_balance: float | None = None
+    broadcast_throttle_ms: int | None = None
 
 
 class WSHub:
@@ -62,16 +63,35 @@ class WSHub:
             self.clients.discard(ws)
 
     async def broadcast(self, msg: dict):
+        """
+        锁外并发发送，防止慢客户端阻塞整个事件循环。
+        关键修复：
+          - 锁内只拍快照（copy clients set），立即释放锁
+          - 锁外用 gather 并发 send_text
+          - 死连接异步清理
+        """
         data = json.dumps(msg)
         async with self._lock:
-            dead = []
-            for c in self.clients:
-                try:
-                    await c.send_text(data)
-                except Exception:
-                    dead.append(c)
-            for c in dead:
-                self.clients.discard(c)
+            snapshot = list(self.clients)   # 拍快照，不在锁里 await
+        if not snapshot:
+            return
+
+        async def _send_one(c):
+            try:
+                await c.send_text(data)
+                return None
+            except Exception:
+                return c
+
+        results = await asyncio.gather(
+            *(_send_one(c) for c in snapshot),
+            return_exceptions=True
+        )
+        dead = [r for r in results if r is not None and not isinstance(r, Exception)]
+        if dead:
+            async with self._lock:
+                for c in dead:
+                    self.clients.discard(c)
 
 
 def _percentile(vals: list[int], pct: float) -> int:

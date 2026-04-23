@@ -75,6 +75,9 @@ class RuntimeConfig:
     symbol_blacklist: str = ""
     # BNB 最低余额保护 (低于此值停止发送 DEX TX，避免gas耗尽)
     min_bnb_balance: float = 0.002
+    # WS 推送节流：每 symbol 两次推送最少间隔（ms）。500=每秒2次。
+    # 防止币安 CEX WS 每秒几十次 tick 把事件循环刷爆
+    broadcast_throttle_ms: int = 500
 
     def to_dict(self):
         return asdict(self)
@@ -155,6 +158,7 @@ def load_runtime_config() -> RuntimeConfig:
         gas_boost_multiplier=_f("GAS_BOOST_MULTIPLIER", 1.5),
         symbol_blacklist=os.getenv("SYMBOL_BLACKLIST", "").strip(),
         min_bnb_balance=_f("MIN_BNB_BALANCE", 0.002),
+        broadcast_throttle_ms=_i("BROADCAST_THROTTLE_MS", 500),
     )
 
     # DB 覆盖（用户从 Dashboard 改的值，优先级最高）

@@ -85,6 +85,10 @@ class ArbEngine:
         # 卡位 token 重试队列：DEX 卖出失败的 token 等待重试
         # key=symbol, value={symbol, token_address, pool_fee, pool_version, amount, ...}
         self.pending_unwind: dict[str, dict] = {}
+        # WS 价格广播节流：symbol -> 上次广播时间戳(ms)
+        # 币安 CEX WS 每秒可能有几十次 tick，不节流会把事件循环刷爆
+        self._last_broadcast_ms: dict[str, int] = {}
+        self._broadcast_throttle_ms = 500   # 每 symbol 最多 2 次/秒
 
     # ---------- 外部入口 ----------
     async def on_cex_price(self, symbol: str, bid: float, ask: float, ts: int):
@@ -113,6 +117,15 @@ class ArbEngine:
     async def _broadcast_price(self, symbol: str):
         if not self.ws_broadcaster:
             return
+        # 节流：默认 500ms 内重复推送同一 symbol 直接丢弃
+        # 运行时可从 Dashboard 调（broadcast_throttle_ms）
+        throttle = int(getattr(RUNTIME, "broadcast_throttle_ms", 500) or 500)
+        now = _ms()
+        last = self._last_broadcast_ms.get(symbol, 0)
+        if now - last < throttle:
+            return
+        self._last_broadcast_ms[symbol] = now
+
         cex = self.prices_cex.get(symbol, {})
         dex = self.prices_dex.get(symbol, {})
         cex_mid = cex.get("mid")
@@ -129,7 +142,7 @@ class ArbEngine:
             "dex": dex_px,
             "dex_source": dex.get("source"),
             "basis_pct": basis * 100 if basis is not None else None,
-            "ts": _ms(),
+            "ts": now,
         })
 
     # ---------- 决策 ----------
